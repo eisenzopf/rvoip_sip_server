@@ -354,19 +354,18 @@ async fn main() -> Result<()> {
     info!("   🎶 Tone: {}Hz for {}s", 
           server_config.behavior.tone_frequency, server_config.behavior.tone_duration_seconds);
 
-    // Create rvoip client using ClientBuilder with proper domain configuration
-    let sip_addr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port).parse()?;
+    // Create rvoip client using public IP for both SIP and media addresses
+    // CRITICAL: Use public IP for local_address - this is used for SDP generation!
+    // rvoip will still bind to 0.0.0.0 internally for listening on all interfaces
+    let public_sip_addr = format!("{}:{}", server_config.sip.domain, server_config.sip.port).parse()?;
+    let public_media_addr = format!("{}:{}", server_config.sip.domain, server_config.media.rtp_port_range_start).parse()?;
     
-    // Use domain (public IP) for media address, not bind_address (0.0.0.0)
-    // The media address must be reachable by external callers for RTP
-    let media_addr = format!("{}:{}", server_config.sip.domain, server_config.media.rtp_port_range_start).parse()?;
-    
-    // Create handler and client using ClientBuilder with domain configuration
+    // Create handler and client using public IP addresses for SDP generation
     let handler = Arc::new(AutoAnswerHandler::new(tone_generator, server_config.clone()));
     let client = ClientBuilder::new()
-        .local_address(sip_addr)
-        .media_address(media_addr)
-        .domain(server_config.sip.domain.clone())  // CRITICAL: Set domain for SDP generation
+        .local_address(public_sip_addr)     // CRITICAL: Public IP for SDP/URI generation
+        .media_address(public_media_addr)   // CRITICAL: Public IP for RTP in SDP
+        .domain(server_config.sip.domain.clone())
         .user_agent(server_config.sip.user_agent.clone())
         .codecs(server_config.media.preferred_codecs.clone())
         .with_media(|m| m
