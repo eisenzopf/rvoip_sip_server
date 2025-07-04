@@ -14,6 +14,9 @@ rvoip = "0.1.6"
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
 
+# Async trait support
+async-trait = "0.1"
+
 # Logging
 log = "0.4"
 env_logger = "0.10"
@@ -39,8 +42,8 @@ reqwest = { version = "0.11", features = ["json"] }
 uuid = { version = "1.0", features = ["v4"] }
 
 # Audio processing (for tone generation)
-hound = "3.5"
-rodio = "0.17"
+# hound = "3.5"  # Removed: not used in code
+# rodio = "0.17"  # Removed: not needed for SIP server, causes ALSA dependency
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }

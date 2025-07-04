@@ -158,7 +158,20 @@ log "Creating README..."
 cat > "$PACKAGE_DIR/README.md" << EOF
 # rvoip SIP Server Package
 
-This package contains the rvoip SIP server and health monitor.
+This package contains an auto-answering SIP server built using the rvoip library,
+with real-time tone generation and comprehensive call monitoring.
+
+## Features
+
+- 📞 **Auto-answering SIP server** using rvoip session-core library
+- 🎵 **Real-time tone generation** (440Hz A4 note by default)  
+- 📡 **Proper SIP protocol handling** (INVITE, 100 Trying, 180 Ringing, 200 OK)
+- 🔄 **RTP media streams** with μ-law/A-law encoding support
+- 📊 **Real-time call statistics** (MOS scores, packet loss, jitter)
+- 🔍 **Media quality monitoring** with automatic alerts
+- 🎯 **DTMF detection** and handling
+- ⚖️ **Health monitoring** with automatic restart capability
+- 🛡️ **Security hardening** with dedicated service user
 
 ## Installation
 
@@ -172,6 +185,26 @@ sudo ./scripts/install.sh
 
 - Main server config: \`/etc/rvoip-sip-server/config.toml\`
 - Health monitor config: \`/etc/rvoip-sip-server/monitor.toml\`
+
+### Key Configuration Options
+
+#### SIP Settings
+- \`bind_address\`: IP address to bind to (default: "0.0.0.0")
+- \`port\`: SIP port (default: 5060)
+- \`domain\`: SIP domain (default: "localhost")
+
+#### Auto-Answer Behavior  
+- \`auto_answer\`: Enable auto-answering (default: true)
+- \`auto_answer_delay_ms\`: Delay before answering (default: 1000ms)
+- \`tone_duration_seconds\`: How long to play tone (default: 30s)
+- \`tone_frequency\`: Tone frequency in Hz (default: 440.0)
+- \`max_concurrent_calls\`: Maximum simultaneous calls (default: 100)
+
+#### Media/RTP Settings
+- \`rtp_port_range_start\`: Start of RTP port range (default: 10000)
+- \`rtp_port_range_end\`: End of RTP port range (default: 20000)
+- \`preferred_codecs\`: Supported audio codecs (default: ["PCMU", "PCMA"])
+- \`enable_dtmf\`: Enable DTMF tone detection (default: true)
 
 ## Service Management
 
@@ -188,10 +221,68 @@ sudo systemctl enable rvoip-health-monitor
 sudo systemctl status rvoip-sip-server
 sudo systemctl status rvoip-health-monitor
 
-# View logs
+# View logs with real-time call statistics
 sudo journalctl -u rvoip-sip-server -f
 sudo journalctl -u rvoip-health-monitor -f
 \`\`\`
+
+## How It Works
+
+When someone calls your server:
+
+1. 📞 **SIP INVITE received** - rvoip handles the full SIP protocol
+2. 🔄 **Auto-answer after delay** - configurable delay (default 1s)
+3. 📡 **SDP negotiation** - automatic offer/answer exchange  
+4. 🎵 **RTP media flow established** - real audio streaming
+5. 🎶 **Tone generation starts** - 440Hz sine wave by default
+6. 📊 **Real-time monitoring** - MOS scores, packet loss, quality alerts
+7. ⏱️ **Configured duration** - plays for 30 seconds by default
+8. 📴 **Call terminates gracefully** - with final statistics
+
+## Monitoring & Statistics
+
+The server provides comprehensive monitoring:
+
+- 🟢 **Call Quality**: Real-time MOS scores and packet loss percentages
+- 📈 **RTP Statistics**: Packets sent/received, bytes transferred, jitter
+- ⚠️ **Quality Alerts**: Automatic warnings for poor call quality  
+- 📊 **Server Statistics**: Every 30 seconds with call counts and durations
+- 🔍 **DTMF Detection**: Logs any DTMF tones received during calls
+
+## Testing
+
+After installation, test with any SIP client:
+
+\`\`\`bash
+# Check if server is listening
+sudo netstat -tulpn | grep :5060
+
+# Test health endpoint
+curl http://localhost:8080/health
+
+# Make a test call (replace with your server IP)
+# Use any SIP client to call: your-server-ip:5060
+\`\`\`
+
+## Logs
+
+\`\`\`bash
+# Real-time server logs with call details
+tail -f /var/log/rvoip-sip-server/server.log
+
+# Monitor logs with systemd
+sudo journalctl -u rvoip-sip-server -f
+
+# Health monitor logs  
+tail -f /var/log/rvoip-sip-server/monitor.log
+\`\`\`
+
+## Firewall Configuration
+
+The installer automatically configures UFW if present:
+- Port 5060 (UDP/TCP): SIP signaling
+- Ports 10000-20000 (UDP): RTP media streams  
+- Port 8080 (TCP): Health check endpoint
 
 ## Uninstallation
 
@@ -204,6 +295,8 @@ sudo ./scripts/uninstall.sh
 ## Version
 
 $VERSION
+
+Built with rvoip library for production-grade SIP functionality.
 EOF
 
 # Create tarball

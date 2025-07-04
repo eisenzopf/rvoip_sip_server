@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Part of complete tone generation API
 pub struct ToneConfig {
     pub frequency: f32,
     pub amplitude: f32,
@@ -23,12 +24,15 @@ impl Default for ToneConfig {
     }
 }
 
+/// Tone generator for creating audio tones
 #[derive(Debug)]
+#[allow(dead_code)] // Part of complete tone generation API
 pub struct ToneGenerator {
     config: Arc<RwLock<ToneConfig>>,
     is_generating: Arc<RwLock<bool>>,
 }
 
+#[allow(dead_code)] // Complete tone generation API for future use
 impl ToneGenerator {
     pub fn new() -> Self {
         Self {
@@ -330,4 +334,4 @@ mod tests {
         // A-law of 0 should be 0x55
         assert_eq!(alaw_samples[0], 0x55);
     }
-} 
+}

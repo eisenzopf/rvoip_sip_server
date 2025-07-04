@@ -12,10 +12,6 @@ Cargo.lock
 *.pid
 *.sock
 
-# Configuration (keep examples, ignore local configs)
-config.local.toml
-monitor.local.toml
-
 # Build artifacts
 /package/
 *.tar.gz
