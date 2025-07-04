@@ -356,7 +356,10 @@ async fn main() -> Result<()> {
 
     // Create rvoip client configuration
     let sip_addr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port).parse()?;
-    let media_addr = format!("{}:{}", server_config.sip.bind_address, server_config.media.rtp_port_range_start).parse()?;
+    
+    // Use domain (public IP) for media address, not bind_address (0.0.0.0)
+    // The media address must be reachable by external callers for RTP
+    let media_addr = format!("{}:{}", server_config.sip.domain, server_config.media.rtp_port_range_start).parse()?;
     
     let rvoip_config = ClientConfig::new()
         .with_sip_addr(sip_addr)
