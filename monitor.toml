@@ -1,0 +1,32 @@
+# rvoip Health Monitor Configuration
+# This is a sample configuration file for development and testing
+
+# Path to the SIP server binary
+server_binary_path = "./target/release/sip-server"
+
+# Path to the SIP server configuration file
+server_config_path = "./config.toml"
+
+# Path to the SIP server PID file
+server_pid_file = "./sip-server.pid"
+
+# Path to the SIP server log file
+server_log_file = "./server.log"
+
+# Health check endpoint URL
+health_check_url = "http://localhost:8080/health"
+
+# Health check interval in seconds
+health_check_interval_seconds = 15
+
+# Health check timeout in seconds
+health_check_timeout_seconds = 5
+
+# Maximum restart attempts before giving up
+max_restart_attempts = 3
+
+# Delay between restart attempts in seconds
+restart_delay_seconds = 3
+
+# Path to the health monitor log file
+monitor_log_file = "./monitor.log" 

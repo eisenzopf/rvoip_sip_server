@@ -1,0 +1,64 @@
+[package]
+name = "rvoip-sip-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Auto-answering SIP server with tone generation using rvoip"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core rvoip libraries
+rvoip = "0.1.6"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+syslog = "6.0"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# System utilities
+clap = { version = "4.0", features = ["derive"] }
+daemonize = "0.4"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Health monitoring
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.0", features = ["v4"] }
+
+# Audio processing (for tone generation)
+hound = "3.5"
+rodio = "0.17"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+
+[[bin]]
+name = "sip-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "health-monitor"
+path = "src/health_monitor.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort" 

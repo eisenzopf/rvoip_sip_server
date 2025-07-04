@@ -1,0 +1,57 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Logs
+*.log
+*.log.*
+/logs/
+
+# Runtime files
+*.pid
+*.sock
+
+# Configuration (keep examples, ignore local configs)
+config.local.toml
+monitor.local.toml
+
+# Build artifacts
+/package/
+*.tar.gz
+*.zip
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Development artifacts
+/dev-logs/
+/test-output/
+.env
+.env.local
+
+# Package manager
+node_modules/
+npm-debug.log*
+
+# System files
+.Trash-*
+.nfs* 

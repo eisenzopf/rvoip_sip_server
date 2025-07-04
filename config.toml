@@ -1,0 +1,44 @@
+# rvoip SIP Server Configuration
+# This is a sample configuration file for development and testing
+
+[sip]
+# Network configuration
+bind_address = "127.0.0.1"      # Use localhost for development
+port = 5060                     # Standard SIP port
+domain = "localhost"            # SIP domain for development
+user_agent = "rvoip-sip-server/0.1.0"
+transport = "udp"               # Transport protocol (udp, tcp, tls)
+
+[behavior]
+# Call handling behavior
+auto_answer = true              # Automatically answer incoming calls
+auto_answer_delay_ms = 2000     # Wait 2 seconds before answering
+tone_duration_seconds = 10      # Play tone for 10 seconds (shorter for testing)
+tone_frequency = 440.0          # A4 note (440 Hz)
+call_timeout_seconds = 300      # Maximum call duration (5 minutes)
+max_concurrent_calls = 10       # Lower limit for development
+
+[media]
+# RTP media configuration
+rtp_port_range_start = 10000    # RTP port range start
+rtp_port_range_end = 10100      # Smaller range for development
+preferred_codecs = ["PCMU", "PCMA", "G722"]  # Supported audio codecs
+enable_dtmf = true              # Enable DTMF tone handling
+audio_sample_rate = 8000        # 8kHz sample rate (telephony standard)
+
+[logging]
+# Logging configuration
+level = "debug"                 # Use debug level for development
+enable_file_logging = true      # Enable file logging
+enable_syslog = false           # Disable syslog for development
+log_file_path = "server.log"    # Local log file
+max_log_size_mb = 10            # Smaller log files for development
+max_log_files = 5               # Keep fewer log files
+
+[health]
+# Health monitoring configuration
+enable_health_check = true      # Enable health check endpoint
+health_check_port = 8080        # HTTP health check port
+health_check_interval_seconds = 10  # Check every 10 seconds
+restart_on_failure = false      # Don't auto-restart in development
+max_restart_attempts = 3        # Maximum restart attempts 
