@@ -16,10 +16,10 @@ use std::path::Path;
 // Real rvoip imports for auto-answering
 use rvoip::{
     client_core::{
-        ClientConfig, ClientEventHandler, ClientError, 
+        ClientEventHandler, ClientError, 
         IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
-        CallAction, CallId, CallState, MediaConfig,
-        client::ClientManager,
+        CallAction, CallId, CallState,
+        client::{ClientManager, ClientBuilder},
     },
 };
 
@@ -354,31 +354,29 @@ async fn main() -> Result<()> {
     info!("   🎶 Tone: {}Hz for {}s", 
           server_config.behavior.tone_frequency, server_config.behavior.tone_duration_seconds);
 
-    // Create rvoip client configuration
+    // Create rvoip client using ClientBuilder with proper domain configuration
     let sip_addr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port).parse()?;
     
     // Use domain (public IP) for media address, not bind_address (0.0.0.0)
     // The media address must be reachable by external callers for RTP
     let media_addr = format!("{}:{}", server_config.sip.domain, server_config.media.rtp_port_range_start).parse()?;
     
-    let rvoip_config = ClientConfig::new()
-        .with_sip_addr(sip_addr)
-        .with_media_addr(media_addr)
-        .with_user_agent(server_config.sip.user_agent.clone())
-        .with_media(MediaConfig {
-            preferred_codecs: server_config.media.preferred_codecs.clone(),
-            dtmf_enabled: server_config.media.enable_dtmf,
-            echo_cancellation: false,
-            noise_suppression: false,
-            auto_gain_control: false,
-            rtp_port_start: server_config.media.rtp_port_range_start,
-            rtp_port_end: server_config.media.rtp_port_range_end,
-            ..Default::default()
-        });
-
-    // Create handler and client
+    // Create handler and client using ClientBuilder with domain configuration
     let handler = Arc::new(AutoAnswerHandler::new(tone_generator, server_config.clone()));
-    let client = ClientManager::new(rvoip_config).await?;
+    let client = ClientBuilder::new()
+        .local_address(sip_addr)
+        .media_address(media_addr)
+        .domain(server_config.sip.domain.clone())  // CRITICAL: Set domain for SDP generation
+        .user_agent(server_config.sip.user_agent.clone())
+        .codecs(server_config.media.preferred_codecs.clone())
+        .with_media(|m| m
+            .echo_cancellation(false)
+            .noise_suppression(false)
+            .auto_gain_control(false)
+            .rtp_ports(server_config.media.rtp_port_range_start..server_config.media.rtp_port_range_end)
+        )
+        .build()
+        .await?;
     
     handler.set_client_manager(client.clone()).await;
     client.set_event_handler(handler.clone()).await;
