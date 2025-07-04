@@ -163,7 +163,7 @@ with real-time tone generation and comprehensive call monitoring.
 
 ## Features
 
-- 📞 **Auto-answering SIP server** using rvoip session-core library
+- 📞 **Auto-answering SIP server** using rvoip client-core library
 - 🎵 **Real-time tone generation** (440Hz A4 note by default)  
 - 📡 **Proper SIP protocol handling** (INVITE, 100 Trying, 180 Ringing, 200 OK)
 - 🔄 **RTP media streams** with μ-law/A-law encoding support
