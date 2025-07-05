@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Core rvoip libraries
-rvoip = "0.1.6"
+rvoip = "0.1.7"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
