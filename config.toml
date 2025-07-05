@@ -5,7 +5,7 @@
 # Network configuration
 bind_address = "0.0.0.0"        # Listen on all interfaces for external calls
 port = 5060                     # Standard SIP port
-domain = "173.225.104.102"      # Use your server's public IP
+domain = "0.0.0.0"      # Use your server's public IP
 user_agent = "rvoip-sip-server/0.1.0"
 transport = "udp"               # Transport protocol (udp, tcp, tls)
 
