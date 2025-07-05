@@ -74,40 +74,25 @@ impl AutoAnswerHandler {
     async fn start_tone_playback(&self, call_id: &CallId) {
         info!("🎵 Starting tone playback for call {}", call_id);
         
-        let tone_generator = Arc::clone(&self.tone_generator);
         let client_ref = Arc::clone(&self.client_manager);
         let call_id = call_id.clone();
         let config = self.server_config.clone();
         
         tokio::spawn(async move {
-            // Generate tone samples
-            match tone_generator.generate_tone().await {
-                Ok(tone_samples) => {
-                    info!("✅ Generated {} tone samples for call {}", tone_samples.len(), call_id);
-                    
-                    // Convert to μ-law for SIP/RTP transmission
-                    let mulaw_samples = tone_generator.pcm_to_mulaw(&tone_samples);
-                    info!("🔄 Converted to {} μ-law samples for call {}", mulaw_samples.len(), call_id);
-                    
-                    // TODO: Send samples via RTP using client.send_audio_data() when available
-                    // For now, simulate the playback duration
-                    let playback_duration = Duration::from_secs(config.behavior.tone_duration_seconds);
-                    info!("🎶 Playing {}Hz tone for {}s on call {}", 
-                          config.behavior.tone_frequency, config.behavior.tone_duration_seconds, call_id);
-                    
-                    tokio::time::sleep(playback_duration).await;
-                    
-                    // Hang up the call after tone completion
-                    if let Some(client) = client_ref.read().await.as_ref() {
-                        info!("📴 Hanging up call {} after tone completion", call_id);
-                        match client.hangup_call(&call_id).await {
-                            Ok(_) => info!("✅ Call {} hung up successfully", call_id),
-                            Err(e) => error!("❌ Failed to hang up call {}: {}", call_id, e),
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Failed to generate tone for call {}: {}", call_id, e);
+            // rvoip's built-in audio transmission is already generating a 440Hz tone
+            // Just wait for the configured duration, then hang up
+            let playback_duration = Duration::from_secs(config.behavior.tone_duration_seconds);
+            info!("🎶 Playing built-in 440Hz tone for {}s on call {}", 
+                  config.behavior.tone_duration_seconds, call_id);
+            
+            tokio::time::sleep(playback_duration).await;
+            
+            // Hang up the call after tone completion
+            if let Some(client) = client_ref.read().await.as_ref() {
+                info!("📴 Hanging up call {} after tone completion", call_id);
+                match client.hangup_call(&call_id).await {
+                    Ok(_) => info!("✅ Call {} hung up successfully", call_id),
+                    Err(e) => error!("❌ Failed to hang up call {}: {}", call_id, e),
                 }
             }
         });
