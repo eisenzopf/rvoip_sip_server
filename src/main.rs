@@ -354,26 +354,29 @@ async fn main() -> Result<()> {
     info!("   🎶 Tone: {}Hz for {}s", 
           server_config.behavior.tone_frequency, server_config.behavior.tone_duration_seconds);
 
-    // Create rvoip client using public IP for both SIP and media addresses
-    // CRITICAL: Use public IP for local_address - this is used for SDP generation!
-    // rvoip will still bind to 0.0.0.0 internally for listening on all interfaces
-    let public_sip_addr = format!("{}:{}", server_config.sip.domain, server_config.sip.port).parse()?;
-    let public_media_addr = format!("{}:{}", server_config.sip.domain, server_config.media.rtp_port_range_start).parse()?;
+    // Create rvoip client using updated API
+    // Use bind_address for both SIP and media addresses
+    // The IP address propagation fix ensures SDP will contain the correct IP
+    let sip_addr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port).parse()?;
+    let media_addr = format!("{}:0", server_config.sip.bind_address).parse()?; // Port 0 for auto-allocation
     
-    // Create handler and client using public IP addresses for SDP generation
+    info!("⚙️ rvoip client configuration:");
+    info!("   📡 SIP address: {}", sip_addr);
+    info!("   🎵 Media address: {}", media_addr);
+    info!("   🌐 Domain: {}", server_config.sip.domain);
+    
+    // Create handler and client using updated API
     let handler = Arc::new(AutoAnswerHandler::new(tone_generator, server_config.clone()));
     let client = ClientBuilder::new()
-        .local_address(public_sip_addr)     // CRITICAL: Public IP for SDP/URI generation
-        .media_address(public_media_addr)   // CRITICAL: Public IP for RTP in SDP
+        .local_address(sip_addr)         // SIP bind address
+        .media_address(media_addr)       // Media bind address (port 0 = auto-allocation)
         .domain(server_config.sip.domain.clone())
         .user_agent(server_config.sip.user_agent.clone())
         .codecs(server_config.media.preferred_codecs.clone())
-        .with_media(|m| m
-            .echo_cancellation(false)
-            .noise_suppression(false)
-            .auto_gain_control(false)
-            .rtp_ports(server_config.media.rtp_port_range_start..server_config.media.rtp_port_range_end)
-        )
+        .rtp_ports(server_config.media.rtp_port_range_start, server_config.media.rtp_port_range_end)
+        .max_concurrent_calls(server_config.behavior.max_concurrent_calls as usize)
+        .echo_cancellation(false)
+        .require_srtp(false)
         .build()
         .await?;
     
