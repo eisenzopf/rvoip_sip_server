@@ -260,8 +260,8 @@ impl Mp3Handler {
 struct SimpleResampler {
     source_rate: u32,
     target_rate: u32,
-    ratio: f64,
-    phase: f64,
+    position: f64,
+    last_sample: f32,
 }
 
 impl SimpleResampler {
@@ -269,21 +269,26 @@ impl SimpleResampler {
         Self {
             source_rate,
             target_rate,
-            ratio: source_rate as f64 / target_rate as f64,
-            phase: 0.0,
+            position: 0.0,
+            last_sample: 0.0,
         }
     }
     
     fn process_sample(&mut self, input_sample: f32) -> Vec<f32> {
         let mut output_samples = Vec::new();
         
-        // Simple linear interpolation resampling
-        while self.phase < 1.0 {
-            output_samples.push(input_sample);
-            self.phase += self.ratio;
+        // For downsampling, advance position by target_rate/source_rate  
+        self.position += self.target_rate as f64 / self.source_rate as f64;
+        
+        // When position >= 1.0, output a sample
+        if self.position >= 1.0 {
+            // Use linear interpolation for better quality
+            let interpolated = self.last_sample + (input_sample - self.last_sample) * 0.5;
+            output_samples.push(interpolated);
+            self.position -= 1.0;
         }
         
-        self.phase -= 1.0;
+        self.last_sample = input_sample;
         output_samples
     }
 }
