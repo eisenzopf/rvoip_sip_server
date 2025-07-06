@@ -19,6 +19,7 @@ const WAV_FILENAME: &str = "jocofullinterview41.wav";
 pub struct Mp3Handler {
     mp3_path: String,
     wav_path: String,
+    telephony_processor: TelephonyAudioProcessor,
 }
 
 impl Mp3Handler {
@@ -26,6 +27,7 @@ impl Mp3Handler {
         Self {
             mp3_path: MP3_FILENAME.to_string(),
             wav_path: WAV_FILENAME.to_string(),
+            telephony_processor: TelephonyAudioProcessor::new(8000.0),
         }
     }
 
@@ -62,13 +64,13 @@ impl Mp3Handler {
     }
 
     /// Convert MP3 to WAV format with specified parameters and proper resampling
-    pub fn convert_mp3_to_wav(&self, target_sample_rate: u32, channels: u16) -> Result<()> {
+    pub fn convert_mp3_to_wav(&mut self, target_sample_rate: u32, channels: u16) -> Result<()> {
         if Path::new(&self.wav_path).exists() {
             info!("🎵 WAV file already exists: {}", self.wav_path);
             return Ok(());
         }
 
-        info!("🔄 Converting MP3 to WAV format ({}Hz, {} channels)", target_sample_rate, channels);
+        info!("🔄 Converting MP3 to WAV format ({}Hz, {} channels) with telephony processing", target_sample_rate, channels);
 
         let file = File::open(&self.mp3_path)
             .context("Failed to open MP3 file")?;
@@ -115,6 +117,9 @@ impl Mp3Handler {
         let max_samples = target_sample_rate as usize * 30; // 30 seconds at target rate
         let mut resampler = SimpleResampler::new(source_sample_rate, target_sample_rate);
         
+        // Reset telephony processor for fresh start
+        self.telephony_processor.reset();
+        
         loop {
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
@@ -144,7 +149,7 @@ impl Mp3Handler {
             // Convert to the target format and write samples
             match audio_buf {
                 AudioBufferRef::F32(buf) => {
-                    // Process samples with resampling
+                    // Process samples with resampling and telephony processing
                     for &sample in buf.chan(0) {
                         if sample_count >= max_samples {
                             break;
@@ -161,7 +166,11 @@ impl Mp3Handler {
                             if sample_count >= max_samples {
                                 break;
                             }
-                            let sample_i16 = (resampled_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            
+                            // Apply telephony processing for better phone call quality
+                            let processed_sample = self.telephony_processor.process_sample(resampled_sample);
+                            
+                            let sample_i16 = (processed_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
                             writer.write_sample(sample_i16)
                                 .context("Failed to write sample")?;
                             sample_count += 1;
@@ -169,7 +178,7 @@ impl Mp3Handler {
                     }
                 }
                 AudioBufferRef::F64(buf) => {
-                    // Process samples with resampling
+                    // Process samples with resampling and telephony processing
                     for &sample in buf.chan(0) {
                         if sample_count >= max_samples {
                             break;
@@ -188,7 +197,11 @@ impl Mp3Handler {
                             if sample_count >= max_samples {
                                 break;
                             }
-                            let sample_i16 = (resampled_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            
+                            // Apply telephony processing for better phone call quality
+                            let processed_sample = self.telephony_processor.process_sample(resampled_sample);
+                            
+                            let sample_i16 = (processed_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
                             writer.write_sample(sample_i16)
                                 .context("Failed to write sample")?;
                             sample_count += 1;
@@ -208,7 +221,8 @@ impl Mp3Handler {
         writer.finalize()
             .context("Failed to finalize WAV file")?;
         
-        info!("✅ MP3 converted to WAV: {} ({} samples at {}Hz)", self.wav_path, sample_count, target_sample_rate);
+        info!("✅ MP3 converted to WAV with telephony processing: {} ({} samples at {}Hz)", 
+              self.wav_path, sample_count, target_sample_rate);
         Ok(())
     }
 
@@ -290,6 +304,168 @@ impl SimpleResampler {
         
         self.last_sample = input_sample;
         output_samples
+    }
+}
+
+/// Telephony-optimized audio processor for 8000Hz phone calls
+pub struct TelephonyAudioProcessor {
+    sample_rate: f32,
+    // Preemphasis filter state
+    preemphasis_prev: f32,
+    // Bandpass filter states (2nd order Butterworth)
+    bandpass_x1: f32,
+    bandpass_x2: f32,
+    bandpass_y1: f32,
+    bandpass_y2: f32,
+    // Dynamic range compressor
+    compressor_envelope: f32,
+    // Noise gate
+    noise_gate_threshold: f32,
+    noise_gate_ratio: f32,
+}
+
+impl TelephonyAudioProcessor {
+    pub fn new(sample_rate: f32) -> Self {
+        Self {
+            sample_rate,
+            preemphasis_prev: 0.0,
+            bandpass_x1: 0.0,
+            bandpass_x2: 0.0,
+            bandpass_y1: 0.0,
+            bandpass_y2: 0.0,
+            compressor_envelope: 0.0,
+            noise_gate_threshold: 0.01, // -40dB threshold
+            noise_gate_ratio: 0.1,
+        }
+    }
+    
+    /// Process audio sample through the telephony pipeline
+    pub fn process_sample(&mut self, input: f32) -> f32 {
+        // Step 1: Preemphasis filter (boost high frequencies)
+        let preemphasized = self.preemphasis_filter(input);
+        
+        // Step 2: Bandpass filter (300-3400Hz for telephony)
+        let bandpassed = self.bandpass_filter(preemphasized);
+        
+        // Step 3: Dynamic range compression
+        let compressed = self.dynamic_range_compressor(bandpassed);
+        
+        // Step 4: Noise gate
+        let gated = self.noise_gate(compressed);
+        
+        // Step 5: Final limiting to prevent clipping
+        self.soft_limiter(gated)
+    }
+    
+    /// Preemphasis filter - boosts high frequencies for better telephony transmission
+    fn preemphasis_filter(&mut self, input: f32) -> f32 {
+        // Simple first-order high-pass filter with alpha = 0.95
+        let alpha = 0.95;
+        let output = input - alpha * self.preemphasis_prev;
+        self.preemphasis_prev = input;
+        output
+    }
+    
+    /// Bandpass filter 300-3400Hz (telephony bandwidth)
+    fn bandpass_filter(&mut self, input: f32) -> f32 {
+        // 2nd order Butterworth bandpass filter coefficients for 300-3400Hz @ 8000Hz
+        // Low cutoff: 300Hz, High cutoff: 3400Hz
+        let low_freq = 300.0;
+        let high_freq = 3400.0;
+        let nyquist = self.sample_rate / 2.0;
+        
+        // Normalized frequencies
+        let wc1 = 2.0 * std::f32::consts::PI * low_freq / self.sample_rate;
+        let wc2 = 2.0 * std::f32::consts::PI * high_freq / self.sample_rate;
+        
+        // Bilinear transform coefficients (simplified)
+        let k1 = (wc1 / 2.0).tan();
+        let k2 = (wc2 / 2.0).tan();
+        let k = k2 - k1;
+        let delta = 1.0 + k + k1 * k2;
+        
+        // Filter coefficients
+        let a0 = k / delta;
+        let a1 = 0.0;
+        let a2 = -k / delta;
+        let b1 = (2.0 * (k1 * k2 - 1.0)) / delta;
+        let b2 = (1.0 - k + k1 * k2) / delta;
+        
+        // Apply filter
+        let output = a0 * input + a1 * self.bandpass_x1 + a2 * self.bandpass_x2 
+                   - b1 * self.bandpass_y1 - b2 * self.bandpass_y2;
+        
+        // Update state
+        self.bandpass_x2 = self.bandpass_x1;
+        self.bandpass_x1 = input;
+        self.bandpass_y2 = self.bandpass_y1;
+        self.bandpass_y1 = output;
+        
+        output
+    }
+    
+    /// Dynamic range compressor for consistent volume levels
+    fn dynamic_range_compressor(&mut self, input: f32) -> f32 {
+        let input_level = input.abs();
+        let target_level = 0.5; // Target RMS level
+        let attack_time = 0.001; // 1ms attack
+        let release_time = 0.1;  // 100ms release
+        
+        let attack_coeff = (-1.0 / (attack_time * self.sample_rate)).exp();
+        let release_coeff = (-1.0 / (release_time * self.sample_rate)).exp();
+        
+        // Envelope follower
+        if input_level > self.compressor_envelope {
+            self.compressor_envelope = attack_coeff * self.compressor_envelope + (1.0 - attack_coeff) * input_level;
+        } else {
+            self.compressor_envelope = release_coeff * self.compressor_envelope + (1.0 - release_coeff) * input_level;
+        }
+        
+        // Compression ratio
+        let ratio = 4.0; // 4:1 compression
+        let threshold = 0.3;
+        
+        let gain = if self.compressor_envelope > threshold {
+            let excess = self.compressor_envelope - threshold;
+            let compressed_excess = excess / ratio;
+            (threshold + compressed_excess) / self.compressor_envelope
+        } else {
+            1.0
+        };
+        
+        input * gain
+    }
+    
+    /// Noise gate to reduce background noise
+    fn noise_gate(&mut self, input: f32) -> f32 {
+        let input_level = input.abs();
+        
+        if input_level < self.noise_gate_threshold {
+            input * self.noise_gate_ratio
+        } else {
+            input
+        }
+    }
+    
+    /// Soft limiter to prevent clipping
+    fn soft_limiter(&self, input: f32) -> f32 {
+        let threshold = 0.9;
+        
+        if input.abs() > threshold {
+            threshold * input.signum() * (1.0 - (-3.0 * (input.abs() - threshold)).exp())
+        } else {
+            input
+        }
+    }
+    
+    /// Reset all filter states
+    pub fn reset(&mut self) {
+        self.preemphasis_prev = 0.0;
+        self.bandpass_x1 = 0.0;
+        self.bandpass_x2 = 0.0;
+        self.bandpass_y1 = 0.0;
+        self.bandpass_y2 = 0.0;
+        self.compressor_envelope = 0.0;
     }
 }
 

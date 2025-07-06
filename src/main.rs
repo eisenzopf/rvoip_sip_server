@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
     }
 
     // Create MP3 handler and initialize MP3 file
-    let mp3_handler = Arc::new(Mp3Handler::new());
+    let mut mp3_handler = Mp3Handler::new();
     
     info!("📥 Initializing MP3 file...");
     mp3_handler.ensure_mp3_downloaded().await
@@ -377,7 +377,10 @@ async fn main() -> Result<()> {
         1 // Mono channel for telephony
     ).context("Failed to convert MP3 to WAV")?;
     
-    info!("✅ MP3 file ready for playback");
+    info!("✅ MP3 file ready for playback with telephony optimization");
+    
+    // Wrap in Arc after processing
+    let mp3_handler = Arc::new(mp3_handler);
     
     log_server_configuration(&server_config);
 
