@@ -41,4 +41,49 @@ enable_health_check = true      # Enable health check endpoint
 health_check_port = 8080        # HTTP health check port
 health_check_interval_seconds = 10  # Check every 10 seconds
 restart_on_failure = false      # Don't auto-restart in development
-max_restart_attempts = 3        # Maximum restart attempts 
+max_restart_attempts = 3        # Maximum restart attempts
+
+[audio_processing]
+# Audio processing configuration for telephony optimization
+preemphasis_alpha = 0.95                    # Preemphasis filter coefficient (0.0-1.0)
+bandpass_low_freq = 300.0                   # Bandpass filter low frequency (Hz)
+bandpass_high_freq = 3400.0                 # Bandpass filter high frequency (Hz)
+
+# 3-band compressor crossover frequencies
+band_split_freq_1 = 800.0                   # Split between low-mid and mid band (Hz)
+band_split_freq_2 = 2500.0                  # Split between mid and high-mid band (Hz)
+
+# Global settings (must be defined before nested sections)
+noise_gate_threshold = 0.01                 # Noise gate threshold (0.0-1.0)
+noise_gate_ratio = 0.1                      # Noise gate ratio for quiet signals
+soft_limiter_threshold = 0.9                # Soft limiter threshold (0.0-1.0)
+
+# Band 1 compressor: Low-Mid (300-800Hz) - Controls bass and low-frequency content
+[audio_processing.band1_compressor]
+target_level = 0.4                          # Target level for low-mid band
+attack_time = 0.010                         # Attack time (seconds) - slower for musical content
+release_time = 0.15                         # Release time (seconds) - longer for bass
+ratio = 4.0                                 # Compression ratio - more aggressive for bass control
+threshold_factor = 0.6                      # Threshold factor (0.0-1.0)
+knee_width = 0.15                           # Soft knee width for smooth compression
+enabled = true                              # Enable/disable this band
+
+# Band 2 compressor: Mid (800-2500Hz) - Controls vocals and speech clarity
+[audio_processing.band2_compressor]
+target_level = 0.6                          # Target level for mid band
+attack_time = 0.020                         # Attack time (seconds) - slower for speech preservation
+release_time = 0.08                         # Release time (seconds) - faster for speech
+ratio = 2.5                                 # Compression ratio - gentler for vocals
+threshold_factor = 0.75                     # Threshold factor (0.0-1.0)
+knee_width = 0.2                            # Soft knee width for smooth compression
+enabled = true                              # Enable/disable this band
+
+# Band 3 compressor: High-Mid (2500-3400Hz) - Controls presence and clarity
+[audio_processing.band3_compressor]
+target_level = 0.7                          # Target level for high-mid band
+attack_time = 0.005                         # Attack time (seconds) - fast for transient control
+release_time = 0.05                         # Release time (seconds) - quick for clarity
+ratio = 2.0                                 # Compression ratio - gentle for presence
+threshold_factor = 0.8                      # Threshold factor (0.0-1.0)
+knee_width = 0.1                            # Soft knee width for smooth compression
+enabled = true                              # Enable/disable this band 

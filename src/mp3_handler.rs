@@ -11,6 +11,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::default::get_probe;
 use hound::{WavSpec, WavWriter};
+use crate::config::{AudioProcessingConfig, CompressorBandConfig};
 
 const MP3_FILENAME: &str = "jocofullinterview41.mp3";
 const MP3_URL: &str = "https://archive.org/download/NeverGonnaGiveYouUp/jocofullinterview41.mp3";
@@ -23,11 +24,11 @@ pub struct Mp3Handler {
 }
 
 impl Mp3Handler {
-    pub fn new() -> Self {
+    pub fn new(audio_config: &AudioProcessingConfig) -> Self {
         Self {
             mp3_path: MP3_FILENAME.to_string(),
             wav_path: WAV_FILENAME.to_string(),
-            telephony_processor: TelephonyAudioProcessor::new(8000.0),
+            telephony_processor: TelephonyAudioProcessor::new(8000.0, audio_config.clone()),
         }
     }
 
@@ -310,6 +311,7 @@ impl SimpleResampler {
 /// Telephony-optimized audio processor for 8000Hz phone calls
 pub struct TelephonyAudioProcessor {
     sample_rate: f32,
+    config: AudioProcessingConfig,
     // Preemphasis filter state
     preemphasis_prev: f32,
     // Bandpass filter states (2nd order Butterworth)
@@ -317,25 +319,78 @@ pub struct TelephonyAudioProcessor {
     bandpass_x2: f32,
     bandpass_y1: f32,
     bandpass_y2: f32,
-    // Dynamic range compressor
-    compressor_envelope: f32,
-    // Noise gate
-    noise_gate_threshold: f32,
-    noise_gate_ratio: f32,
+    // 3-band compressor components
+    band_filters: BandSplitFilters,
+    band1_compressor: BandCompressor,
+    band2_compressor: BandCompressor,
+    band3_compressor: BandCompressor,
+}
+
+/// Band-splitting filters for 3-band processing
+struct BandSplitFilters {
+    // Low-pass filter for band 1 (low-mid)
+    lowpass1_x1: f32,
+    lowpass1_x2: f32,
+    lowpass1_y1: f32,
+    lowpass1_y2: f32,
+    // High-pass filter for band 3 (high-mid)
+    highpass2_x1: f32,
+    highpass2_x2: f32,
+    highpass2_y1: f32,
+    highpass2_y2: f32,
+    // Bandpass filter for band 2 (mid)
+    bandpass2_x1: f32,
+    bandpass2_x2: f32,
+    bandpass2_y1: f32,
+    bandpass2_y2: f32,
+}
+
+/// Individual compressor for each band
+struct BandCompressor {
+    envelope: f32,
+}
+
+impl BandSplitFilters {
+    fn new() -> Self {
+        Self {
+            lowpass1_x1: 0.0,
+            lowpass1_x2: 0.0,
+            lowpass1_y1: 0.0,
+            lowpass1_y2: 0.0,
+            highpass2_x1: 0.0,
+            highpass2_x2: 0.0,
+            highpass2_y1: 0.0,
+            highpass2_y2: 0.0,
+            bandpass2_x1: 0.0,
+            bandpass2_x2: 0.0,
+            bandpass2_y1: 0.0,
+            bandpass2_y2: 0.0,
+        }
+    }
+}
+
+impl BandCompressor {
+    fn new() -> Self {
+        Self {
+            envelope: 0.0,
+        }
+    }
 }
 
 impl TelephonyAudioProcessor {
-    pub fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32, config: AudioProcessingConfig) -> Self {
         Self {
             sample_rate,
+            config,
             preemphasis_prev: 0.0,
             bandpass_x1: 0.0,
             bandpass_x2: 0.0,
             bandpass_y1: 0.0,
             bandpass_y2: 0.0,
-            compressor_envelope: 0.0,
-            noise_gate_threshold: 0.01, // -40dB threshold
-            noise_gate_ratio: 0.1,
+            band_filters: BandSplitFilters::new(),
+            band1_compressor: BandCompressor::new(),
+            band2_compressor: BandCompressor::new(),
+            band3_compressor: BandCompressor::new(),
         }
     }
     
@@ -347,8 +402,8 @@ impl TelephonyAudioProcessor {
         // Step 2: Bandpass filter (300-3400Hz for telephony)
         let bandpassed = self.bandpass_filter(preemphasized);
         
-        // Step 3: Dynamic range compression
-        let compressed = self.dynamic_range_compressor(bandpassed);
+        // Step 3: 3-band dynamic range compression
+        let compressed = self.three_band_compressor(bandpassed);
         
         // Step 4: Noise gate
         let gated = self.noise_gate(compressed);
@@ -359,18 +414,18 @@ impl TelephonyAudioProcessor {
     
     /// Preemphasis filter - boosts high frequencies for better telephony transmission
     fn preemphasis_filter(&mut self, input: f32) -> f32 {
-        // Simple first-order high-pass filter with alpha = 0.95
-        let alpha = 0.95;
+        // Simple first-order high-pass filter with configurable alpha
+        let alpha = self.config.preemphasis_alpha;
         let output = input - alpha * self.preemphasis_prev;
         self.preemphasis_prev = input;
         output
     }
     
-    /// Bandpass filter 300-3400Hz (telephony bandwidth)
+    /// Bandpass filter (configurable telephony bandwidth)
     fn bandpass_filter(&mut self, input: f32) -> f32 {
-        // 2nd order Butterworth bandpass filter coefficients for 300-3400Hz @ 8000Hz
-        let low_freq: f32 = 300.0;
-        let high_freq: f32 = 3400.0;
+        // 2nd order Butterworth bandpass filter coefficients with configurable frequencies
+        let low_freq: f32 = self.config.bandpass_low_freq;
+        let high_freq: f32 = self.config.bandpass_high_freq;
         let nyquist = self.sample_rate / 2.0;
         
         // Ensure frequencies are within Nyquist limit
@@ -411,30 +466,167 @@ impl TelephonyAudioProcessor {
         if output.is_finite() { output } else { 0.0 }
     }
     
-    /// Dynamic range compressor for consistent volume levels
-    fn dynamic_range_compressor(&mut self, input: f32) -> f32 {
-        let input_level = input.abs();
-        let target_level = 0.5; // Target RMS level for consistent loudness
-        let attack_time = 0.003; // 3ms attack (faster than 1ms to avoid artifacts)
-        let release_time = 0.1;  // 100ms release
+    /// Apply low-pass filter for band splitting
+    fn apply_lowpass_filter(input: f32, cutoff_freq: f32, sample_rate: f32, x1: &mut f32, x2: &mut f32, y1: &mut f32, y2: &mut f32) -> f32 {
+        let nyquist = sample_rate / 2.0;
+        let wc = cutoff_freq / nyquist;
+        let wc_pre = (std::f32::consts::PI * wc / 2.0).tan();
         
-        let attack_coeff = (-1.0 / (attack_time * self.sample_rate)).exp();
-        let release_coeff = (-1.0 / (release_time * self.sample_rate)).exp();
+        // 2nd order Butterworth low-pass coefficients
+        let norm = 1.0 + std::f32::consts::SQRT_2 * wc_pre + wc_pre * wc_pre;
+        let b0 = wc_pre * wc_pre / norm;
+        let b1 = 2.0 * b0;
+        let b2 = b0;
+        let a1 = (2.0 * (wc_pre * wc_pre - 1.0)) / norm;
+        let a2 = (1.0 - std::f32::consts::SQRT_2 * wc_pre + wc_pre * wc_pre) / norm;
+        
+        // Apply filter
+        let output = b0 * input + b1 * *x1 + b2 * *x2 - a1 * *y1 - a2 * *y2;
+        
+        // Update state
+        *x2 = *x1;
+        *x1 = input;
+        *y2 = *y1;
+        *y1 = output;
+        
+        if output.is_finite() { output } else { 0.0 }
+    }
+    
+    /// Apply high-pass filter for band splitting
+    fn apply_highpass_filter(input: f32, cutoff_freq: f32, sample_rate: f32, x1: &mut f32, x2: &mut f32, y1: &mut f32, y2: &mut f32) -> f32 {
+        let nyquist = sample_rate / 2.0;
+        let wc = cutoff_freq / nyquist;
+        let wc_pre = (std::f32::consts::PI * wc / 2.0).tan();
+        
+        // 2nd order Butterworth high-pass coefficients
+        let norm = 1.0 + std::f32::consts::SQRT_2 * wc_pre + wc_pre * wc_pre;
+        let b0 = 1.0 / norm;
+        let b1 = -2.0 * b0;
+        let b2 = b0;
+        let a1 = (2.0 * (wc_pre * wc_pre - 1.0)) / norm;
+        let a2 = (1.0 - std::f32::consts::SQRT_2 * wc_pre + wc_pre * wc_pre) / norm;
+        
+        // Apply filter
+        let output = b0 * input + b1 * *x1 + b2 * *x2 - a1 * *y1 - a2 * *y2;
+        
+        // Update state
+        *x2 = *x1;
+        *x1 = input;
+        *y2 = *y1;
+        *y1 = output;
+        
+        if output.is_finite() { output } else { 0.0 }
+    }
+    
+    /// Apply band-pass filter for band splitting
+    fn apply_bandpass_filter(input: f32, low_freq: f32, high_freq: f32, sample_rate: f32, x1: &mut f32, x2: &mut f32, y1: &mut f32, y2: &mut f32) -> f32 {
+        let nyquist = sample_rate / 2.0;
+        let wc1 = low_freq / nyquist;
+        let wc2 = high_freq / nyquist;
+        
+        let wc1_pre = (std::f32::consts::PI * wc1 / 2.0).tan();
+        let wc2_pre = (std::f32::consts::PI * wc2 / 2.0).tan();
+        
+        // Bandpass filter design
+        let bw = wc2_pre - wc1_pre;
+        let wc = (wc1_pre * wc2_pre).sqrt();
+        
+        // 2nd order bandpass coefficients
+        let norm = 1.0 + bw + wc * wc;
+        let b0 = bw / norm;
+        let b1 = 0.0;
+        let b2 = -bw / norm;
+        let a1 = (2.0 * (wc * wc - 1.0)) / norm;
+        let a2 = (1.0 - bw + wc * wc) / norm;
+        
+        // Apply filter
+        let output = b0 * input + b1 * *x1 + b2 * *x2 - a1 * *y1 - a2 * *y2;
+        
+        // Update state
+        *x2 = *x1;
+        *x1 = input;
+        *y2 = *y1;
+        *y1 = output;
+        
+        if output.is_finite() { output } else { 0.0 }
+    }
+    
+    /// 3-band dynamic range compressor for consistent volume levels
+    fn three_band_compressor(&mut self, input: f32) -> f32 {
+        // Split the input into 3 frequency bands
+        let (band1, band2, band3) = self.split_into_bands(input);
+        
+        // Extract needed values to avoid borrowing conflicts
+        let sample_rate = self.sample_rate;
+        let band1_config = self.config.band1_compressor.clone();
+        let band2_config = self.config.band2_compressor.clone();
+        let band3_config = self.config.band3_compressor.clone();
+        
+        // Apply compression to each band independently
+        let compressed_band1 = Self::compress_band(band1, &band1_config, &mut self.band1_compressor, sample_rate);
+        let compressed_band2 = Self::compress_band(band2, &band2_config, &mut self.band2_compressor, sample_rate);
+        let compressed_band3 = Self::compress_band(band3, &band3_config, &mut self.band3_compressor, sample_rate);
+        
+        // Combine the bands back together
+        let combined = compressed_band1 + compressed_band2 + compressed_band3;
+        
+        // Prevent NaN/Inf propagation
+        if combined.is_finite() { combined } else { 0.0 }
+    }
+    
+    /// Split audio into 3 frequency bands
+    fn split_into_bands(&mut self, input: f32) -> (f32, f32, f32) {
+        let nyquist = self.sample_rate / 2.0;
+        let split_freq_1 = self.config.band_split_freq_1.min(nyquist * 0.95);
+        let split_freq_2 = self.config.band_split_freq_2.min(nyquist * 0.95);
+        let sample_rate = self.sample_rate;
+        
+        // Band 1: Low-pass filter (300Hz - split_freq_1)
+        let band1 = Self::apply_lowpass_filter(input, split_freq_1, sample_rate,
+            &mut self.band_filters.lowpass1_x1, &mut self.band_filters.lowpass1_x2,
+            &mut self.band_filters.lowpass1_y1, &mut self.band_filters.lowpass1_y2);
+        
+        // Band 3: High-pass filter (split_freq_2 - 3400Hz)
+        let band3 = Self::apply_highpass_filter(input, split_freq_2, sample_rate,
+            &mut self.band_filters.highpass2_x1, &mut self.band_filters.highpass2_x2,
+            &mut self.band_filters.highpass2_y1, &mut self.band_filters.highpass2_y2);
+        
+        // Band 2: Bandpass filter (split_freq_1 - split_freq_2)
+        let band2 = Self::apply_bandpass_filter(input, split_freq_1, split_freq_2, sample_rate,
+            &mut self.band_filters.bandpass2_x1, &mut self.band_filters.bandpass2_x2,
+            &mut self.band_filters.bandpass2_y1, &mut self.band_filters.bandpass2_y2);
+        
+        (band1, band2, band3)
+    }
+    
+    /// Apply compression to a single band
+    fn compress_band(input: f32, config: &CompressorBandConfig, compressor: &mut BandCompressor, sample_rate: f32) -> f32 {
+        if !config.enabled {
+            return input;
+        }
+        
+        let input_level = input.abs();
+        let target_level = config.target_level;
+        let attack_time = config.attack_time;
+        let release_time = config.release_time;
+        
+        let attack_coeff = (-1.0 / (attack_time * sample_rate)).exp();
+        let release_coeff = (-1.0 / (release_time * sample_rate)).exp();
         
         // Envelope follower with proper attack/release
-        if input_level > self.compressor_envelope {
-            self.compressor_envelope = attack_coeff * self.compressor_envelope + (1.0 - attack_coeff) * input_level;
+        if input_level > compressor.envelope {
+            compressor.envelope = attack_coeff * compressor.envelope + (1.0 - attack_coeff) * input_level;
         } else {
-            self.compressor_envelope = release_coeff * self.compressor_envelope + (1.0 - release_coeff) * input_level;
+            compressor.envelope = release_coeff * compressor.envelope + (1.0 - release_coeff) * input_level;
         }
         
         // Professional compressor with proper knee
-        let ratio = 3.0; // 3:1 compression ratio
-        let threshold = target_level * 0.7; // Threshold at 70% of target level
-        let knee_width = 0.1; // Soft knee
+        let ratio = config.ratio;
+        let threshold = target_level * config.threshold_factor;
+        let knee_width = config.knee_width;
         
-        let gain = if self.compressor_envelope > threshold {
-            let excess = self.compressor_envelope - threshold;
+        let gain = if compressor.envelope > threshold {
+            let excess = compressor.envelope - threshold;
             
             // Soft knee compression
             let knee_ratio = if excess < knee_width {
@@ -447,8 +639,8 @@ impl TelephonyAudioProcessor {
             let compressed_level = threshold + compressed_excess;
             
             // Calculate gain reduction
-            if self.compressor_envelope > 1e-10 {
-                compressed_level / self.compressor_envelope
+            if compressor.envelope > 1e-10 {
+                compressed_level / compressor.envelope
             } else {
                 1.0
             }
@@ -469,8 +661,8 @@ impl TelephonyAudioProcessor {
     fn noise_gate(&mut self, input: f32) -> f32 {
         let input_level = input.abs();
         
-        if input_level < self.noise_gate_threshold {
-            input * self.noise_gate_ratio
+        if input_level < self.config.noise_gate_threshold {
+            input * self.config.noise_gate_ratio
         } else {
             input
         }
@@ -478,7 +670,7 @@ impl TelephonyAudioProcessor {
     
     /// Soft limiter to prevent clipping
     fn soft_limiter(&self, input: f32) -> f32 {
-        let threshold = 0.9;
+        let threshold = self.config.soft_limiter_threshold;
         
         if input.abs() > threshold {
             threshold * input.signum() * (1.0 - (-3.0 * (input.abs() - threshold)).exp())
@@ -494,7 +686,25 @@ impl TelephonyAudioProcessor {
         self.bandpass_x2 = 0.0;
         self.bandpass_y1 = 0.0;
         self.bandpass_y2 = 0.0;
-        self.compressor_envelope = 0.0;
+        
+        // Reset band filter states
+        self.band_filters.lowpass1_x1 = 0.0;
+        self.band_filters.lowpass1_x2 = 0.0;
+        self.band_filters.lowpass1_y1 = 0.0;
+        self.band_filters.lowpass1_y2 = 0.0;
+        self.band_filters.highpass2_x1 = 0.0;
+        self.band_filters.highpass2_x2 = 0.0;
+        self.band_filters.highpass2_y1 = 0.0;
+        self.band_filters.highpass2_y2 = 0.0;
+        self.band_filters.bandpass2_x1 = 0.0;
+        self.band_filters.bandpass2_x2 = 0.0;
+        self.band_filters.bandpass2_y1 = 0.0;
+        self.band_filters.bandpass2_y2 = 0.0;
+        
+        // Reset compressor states
+        self.band1_compressor.envelope = 0.0;
+        self.band2_compressor.envelope = 0.0;
+        self.band3_compressor.envelope = 0.0;
     }
 }
 

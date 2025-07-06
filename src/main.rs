@@ -21,7 +21,7 @@ use rvoip::client_core::{
     CallAction, ClientError, IncomingCallInfo
 };
 
-mod config;
+pub mod config;
 mod logger;
 mod mp3_handler;
 
@@ -68,13 +68,7 @@ impl AutoAnswerHandler {
         *self.client_manager.write().await = Some(client);
     }
 
-    /// Set up event handling with the client
-    pub async fn set_event_handler(&self) {
-        if let Some(_client) = self.client_manager.read().await.as_ref() {
-            // The handler is already set up through ClientEventHandler trait implementation
-            info!("📡 Event handler configured for client");
-        }
-    }
+
 
     /// Prepare audio samples for transmission (called during initialization)
     pub async fn prepare_audio_samples(&self) -> Result<(), anyhow::Error> {
@@ -366,7 +360,7 @@ async fn main() -> Result<()> {
     }
 
     // Create MP3 handler and initialize MP3 file
-    let mut mp3_handler = Mp3Handler::new();
+    let mut mp3_handler = Mp3Handler::new(&server_config.audio_processing);
     
     info!("📥 Initializing MP3 file...");
     mp3_handler.ensure_mp3_downloaded().await

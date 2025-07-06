@@ -6,6 +6,10 @@ authors = ["Your Name <your.email@example.com>"]
 description = "Auto-answering SIP server with tone generation using rvoip"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "rvoip_sip_server"
+path = "src/lib.rs"
+
 [dependencies]
 # Core rvoip libraries
 rvoip = "0.1.10"

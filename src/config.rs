@@ -11,6 +11,7 @@ pub struct ServerConfig {
     pub media: MediaConfig,
     pub logging: LoggingConfig,
     pub health: HealthConfig,
+    pub audio_processing: AudioProcessingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,33 @@ pub struct HealthConfig {
     pub max_restart_attempts: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioProcessingConfig {
+    pub preemphasis_alpha: f32,
+    pub bandpass_low_freq: f32,
+    pub bandpass_high_freq: f32,
+    // 3-band compressor settings
+    pub band_split_freq_1: f32,      // Split between band 1 and 2
+    pub band_split_freq_2: f32,      // Split between band 2 and 3
+    pub band1_compressor: CompressorBandConfig,  // Low-Mid band (300-800Hz)
+    pub band2_compressor: CompressorBandConfig,  // Mid band (800-2500Hz)
+    pub band3_compressor: CompressorBandConfig,  // High-Mid band (2500-3400Hz)
+    pub noise_gate_threshold: f32,
+    pub noise_gate_ratio: f32,
+    pub soft_limiter_threshold: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressorBandConfig {
+    pub target_level: f32,
+    pub attack_time: f32,
+    pub release_time: f32,
+    pub ratio: f32,
+    pub threshold_factor: f32,
+    pub knee_width: f32,
+    pub enabled: bool,
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -68,6 +96,7 @@ impl Default for ServerConfig {
             media: MediaConfig::default(),
             logging: LoggingConfig::default(),
             health: HealthConfig::default(),
+            audio_processing: AudioProcessingConfig::default(),
         }
     }
 }
@@ -130,6 +159,66 @@ impl Default for HealthConfig {
             health_check_interval_seconds: 30,
             restart_on_failure: true,
             max_restart_attempts: 3,
+        }
+    }
+}
+
+impl Default for AudioProcessingConfig {
+    fn default() -> Self {
+        Self {
+            preemphasis_alpha: 0.95,
+            bandpass_low_freq: 300.0,
+            bandpass_high_freq: 3400.0,
+            // 3-band compressor crossover frequencies
+            band_split_freq_1: 800.0,   // Split between low-mid and mid
+            band_split_freq_2: 2500.0,  // Split between mid and high-mid
+            // Band 1: Low-Mid (300-800Hz) - more aggressive for bass control
+            band1_compressor: CompressorBandConfig {
+                target_level: 0.4,
+                attack_time: 0.010,     // Slower attack for musical content
+                release_time: 0.15,     // Longer release
+                ratio: 4.0,             // More aggressive for bass control
+                threshold_factor: 0.6,
+                knee_width: 0.15,
+                enabled: true,
+            },
+            // Band 2: Mid (800-2500Hz) - gentler for vocal clarity
+            band2_compressor: CompressorBandConfig {
+                target_level: 0.6,
+                attack_time: 0.020,     // Even slower for speech preservation
+                release_time: 0.08,     // Faster release for speech
+                ratio: 2.5,             // Gentler for vocals
+                threshold_factor: 0.75,
+                knee_width: 0.2,
+                enabled: true,
+            },
+            // Band 3: High-Mid (2500-3400Hz) - minimal for presence
+            band3_compressor: CompressorBandConfig {
+                target_level: 0.7,
+                attack_time: 0.005,     // Fast for transient control
+                release_time: 0.05,     // Quick release for clarity
+                ratio: 2.0,             // Gentle for presence
+                threshold_factor: 0.8,
+                knee_width: 0.1,
+                enabled: true,
+            },
+            noise_gate_threshold: 0.01,
+            noise_gate_ratio: 0.1,
+            soft_limiter_threshold: 0.9,
+        }
+    }
+}
+
+impl Default for CompressorBandConfig {
+    fn default() -> Self {
+        Self {
+            target_level: 0.5,
+            attack_time: 0.010,
+            release_time: 0.1,
+            ratio: 3.0,
+            threshold_factor: 0.7,
+            knee_width: 0.1,
+            enabled: true,
         }
     }
 }
@@ -211,7 +300,70 @@ impl ServerConfig {
             _ => return Err(anyhow::anyhow!("Invalid transport: {}", self.sip.transport)),
         }
 
+        // Validate audio processing parameters
+        if self.audio_processing.preemphasis_alpha < 0.0 || self.audio_processing.preemphasis_alpha > 1.0 {
+            return Err(anyhow::anyhow!("Invalid preemphasis alpha: {} (must be between 0.0 and 1.0)", 
+                self.audio_processing.preemphasis_alpha));
+        }
+
+        if self.audio_processing.bandpass_low_freq >= self.audio_processing.bandpass_high_freq {
+            return Err(anyhow::anyhow!("Invalid bandpass filter frequencies: low {} >= high {}", 
+                self.audio_processing.bandpass_low_freq, self.audio_processing.bandpass_high_freq));
+        }
+
+        // Validate 3-band compressor frequencies
+        if self.audio_processing.band_split_freq_1 <= self.audio_processing.bandpass_low_freq ||
+           self.audio_processing.band_split_freq_1 >= self.audio_processing.bandpass_high_freq {
+            return Err(anyhow::anyhow!("Invalid band split frequency 1: {} (must be between {} and {})", 
+                self.audio_processing.band_split_freq_1, self.audio_processing.bandpass_low_freq, self.audio_processing.bandpass_high_freq));
+        }
+
+        if self.audio_processing.band_split_freq_2 <= self.audio_processing.band_split_freq_1 ||
+           self.audio_processing.band_split_freq_2 >= self.audio_processing.bandpass_high_freq {
+            return Err(anyhow::anyhow!("Invalid band split frequency 2: {} (must be between {} and {})", 
+                self.audio_processing.band_split_freq_2, self.audio_processing.band_split_freq_1, self.audio_processing.bandpass_high_freq));
+        }
+
+        // Validate each compressor band
+        self.validate_compressor_band(&self.audio_processing.band1_compressor, "Band 1")?;
+        self.validate_compressor_band(&self.audio_processing.band2_compressor, "Band 2")?;
+        self.validate_compressor_band(&self.audio_processing.band3_compressor, "Band 3")?;
+
         log::info!("Configuration validation passed");
+        Ok(())
+    }
+
+    fn validate_compressor_band(&self, band: &CompressorBandConfig, band_name: &str) -> Result<()> {
+        if band.target_level <= 0.0 || band.target_level > 1.0 {
+            return Err(anyhow::anyhow!("Invalid {} target level: {} (must be between 0.0 and 1.0)", 
+                band_name, band.target_level));
+        }
+
+        if band.attack_time <= 0.0 || band.attack_time > 1.0 {
+            return Err(anyhow::anyhow!("Invalid {} attack time: {} (must be between 0.0 and 1.0)", 
+                band_name, band.attack_time));
+        }
+
+        if band.release_time <= 0.0 || band.release_time > 5.0 {
+            return Err(anyhow::anyhow!("Invalid {} release time: {} (must be between 0.0 and 5.0)", 
+                band_name, band.release_time));
+        }
+
+        if band.ratio < 1.0 || band.ratio > 20.0 {
+            return Err(anyhow::anyhow!("Invalid {} ratio: {} (must be between 1.0 and 20.0)", 
+                band_name, band.ratio));
+        }
+
+        if band.threshold_factor < 0.0 || band.threshold_factor > 1.0 {
+            return Err(anyhow::anyhow!("Invalid {} threshold factor: {} (must be between 0.0 and 1.0)", 
+                band_name, band.threshold_factor));
+        }
+
+        if band.knee_width < 0.0 || band.knee_width > 1.0 {
+            return Err(anyhow::anyhow!("Invalid {} knee width: {} (must be between 0.0 and 1.0)", 
+                band_name, band.knee_width));
+        }
+
         Ok(())
     }
 } 
