@@ -382,78 +382,87 @@ impl TelephonyAudioProcessor {
         let wc2 = high_freq / nyquist;
         
         // Pre-warped frequencies for bilinear transform
-        let wc1_pre = (std::f32::consts::PI * wc1).tan();
-        let wc2_pre = (std::f32::consts::PI * wc2).tan();
+        let wc1_pre = (std::f32::consts::PI * wc1 / 2.0).tan();
+        let wc2_pre = (std::f32::consts::PI * wc2 / 2.0).tan();
         
-        // Bandpass filter coefficients using proper bilinear transform
+        // Bandpass filter design using proper bilinear transform
         let bw = wc2_pre - wc1_pre;
         let wc = (wc1_pre * wc2_pre).sqrt();
-        let k = wc.tan();
-        let k2 = k * k;
-        let a0 = 1.0 + k * bw + k2;
         
-        // Normalized coefficients
-        let b0 = k * bw / a0;
+        // Second-order bandpass coefficients
+        let norm = 1.0 + bw + wc * wc;
+        let b0 = bw / norm;
         let b1 = 0.0;
-        let b2 = -k * bw / a0;
-        let a1 = (2.0 * (k2 - 1.0)) / a0;
-        let a2 = (1.0 - k * bw + k2) / a0;
+        let b2 = -bw / norm;
+        let a1 = (2.0 * (wc * wc - 1.0)) / norm;
+        let a2 = (1.0 - bw + wc * wc) / norm;
         
-        // Apply filter
+        // Apply filter (Direct Form II)
         let output = b0 * input + b1 * self.bandpass_x1 + b2 * self.bandpass_x2 
                    - a1 * self.bandpass_y1 - a2 * self.bandpass_y2;
         
-        // Update state
+        // Update state variables
         self.bandpass_x2 = self.bandpass_x1;
         self.bandpass_x1 = input;
         self.bandpass_y2 = self.bandpass_y1;
         self.bandpass_y1 = output;
         
-        output
+        // Prevent NaN/Inf propagation
+        if output.is_finite() { output } else { 0.0 }
     }
     
     /// Dynamic range compressor for consistent volume levels
     fn dynamic_range_compressor(&mut self, input: f32) -> f32 {
         let input_level = input.abs();
         let target_level = 0.5; // Target RMS level for consistent loudness
-        let attack_time = 0.001; // 1ms attack
+        let attack_time = 0.003; // 3ms attack (faster than 1ms to avoid artifacts)
         let release_time = 0.1;  // 100ms release
         
         let attack_coeff = (-1.0 / (attack_time * self.sample_rate)).exp();
         let release_coeff = (-1.0 / (release_time * self.sample_rate)).exp();
         
-        // Envelope follower
+        // Envelope follower with proper attack/release
         if input_level > self.compressor_envelope {
             self.compressor_envelope = attack_coeff * self.compressor_envelope + (1.0 - attack_coeff) * input_level;
         } else {
             self.compressor_envelope = release_coeff * self.compressor_envelope + (1.0 - release_coeff) * input_level;
         }
         
-        // Compression with proper target level normalization
-        let ratio = 4.0; // 4:1 compression
-        let threshold = target_level * 0.7; // Threshold below target level
+        // Professional compressor with proper knee
+        let ratio = 3.0; // 3:1 compression ratio
+        let threshold = target_level * 0.7; // Threshold at 70% of target level
+        let knee_width = 0.1; // Soft knee
         
         let gain = if self.compressor_envelope > threshold {
             let excess = self.compressor_envelope - threshold;
-            let compressed_excess = excess / ratio;
+            
+            // Soft knee compression
+            let knee_ratio = if excess < knee_width {
+                1.0 + (ratio - 1.0) * (excess / knee_width).powi(2)
+            } else {
+                ratio
+            };
+            
+            let compressed_excess = excess / knee_ratio;
             let compressed_level = threshold + compressed_excess;
             
-            // Normalize to target level
-            if self.compressor_envelope > 0.0 {
-                (target_level / self.compressor_envelope) * (compressed_level / target_level)
+            // Calculate gain reduction
+            if self.compressor_envelope > 1e-10 {
+                compressed_level / self.compressor_envelope
             } else {
                 1.0
             }
         } else {
-            // Boost quiet signals toward target level
-            if self.compressor_envelope > 0.0 {
-                (target_level / self.compressor_envelope).min(2.0) // Limit boost to 2x
-            } else {
-                1.0
-            }
+            // Gentle makeup gain for quiet signals
+            let makeup_gain = (target_level / (threshold + 1e-10)).min(1.2);
+            makeup_gain
         };
         
-        input * gain
+        // Apply gain with safety limits
+        let output = input * gain.clamp(0.1, 2.0);
+        
+        // Prevent NaN/Inf propagation
+        if output.is_finite() { output } else { 0.0 }
     }
     
     /// Noise gate to reduce background noise
