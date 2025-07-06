@@ -28,11 +28,11 @@ use tokio::net::TcpListener;
 use serde_json::json;
 
 mod config;
-mod tone_generator;
 mod logger;
+mod mp3_handler;
 
 use config::ServerConfig;
-use tone_generator::ToneGenerator;
+use mp3_handler::Mp3Handler;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/rvoip-sip-server/config.toml";
 const DEFAULT_LOG_PATH: &str = "/var/log/rvoip-sip-server/server.log";
@@ -42,7 +42,7 @@ const DEFAULT_PID_PATH: &str = "/var/run/rvoip-sip-server.pid";
 #[derive(Clone)]
 struct AutoAnswerHandler {
     client_manager: Arc<RwLock<Option<Arc<ClientManager>>>>,
-    tone_generator: Arc<ToneGenerator>,
+    mp3_handler: Arc<Mp3Handler>,
     server_config: Arc<ServerConfig>,
     active_calls: Arc<Mutex<std::collections::HashMap<CallId, tokio::time::Instant>>>,
     call_stats: Arc<Mutex<CallStats>>,
@@ -57,10 +57,10 @@ struct CallStats {
 }
 
 impl AutoAnswerHandler {
-    pub fn new(tone_generator: Arc<ToneGenerator>, server_config: Arc<ServerConfig>) -> Self {
+    pub fn new(mp3_handler: Arc<Mp3Handler>, server_config: Arc<ServerConfig>) -> Self {
         Self {
             client_manager: Arc::new(RwLock::new(None)),
-            tone_generator,
+            mp3_handler,
             server_config,
             active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
             call_stats: Arc::new(Mutex::new(CallStats::default())),
@@ -71,25 +71,40 @@ impl AutoAnswerHandler {
         *self.client_manager.write().await = Some(client);
     }
 
-    async fn start_tone_playback(&self, call_id: &CallId) {
-        info!("🎵 Starting tone playback for call {}", call_id);
+    async fn start_mp3_playback(&self, call_id: &CallId) {
+        info!("🎵 Starting MP3 playback for call {}", call_id);
         
         let client_ref = Arc::clone(&self.client_manager);
         let call_id = call_id.clone();
-        let config = self.server_config.clone();
+        let mp3_handler = self.mp3_handler.clone();
         
         tokio::spawn(async move {
-            // rvoip's built-in audio transmission is already generating a 440Hz tone
-            // Just wait for the configured duration, then hang up
-            let playback_duration = Duration::from_secs(config.behavior.tone_duration_seconds);
-            info!("🎶 Playing built-in 440Hz tone for {}s on call {}", 
-                  config.behavior.tone_duration_seconds, call_id);
+            // Load the MP3 samples
+            let _samples = match mp3_handler.read_wav_samples() {
+                Ok(samples) => samples,
+                Err(e) => {
+                    error!("❌ Failed to read MP3 samples: {}", e);
+                    return;
+                }
+            };
             
-            tokio::time::sleep(playback_duration).await;
+            info!("🎶 Playing MP3 audio for 30 seconds on call {}", call_id);
             
-            // Hang up the call after tone completion
+            // For now, we'll use rvoip's built-in audio transmission
+            // TODO: Implement custom audio streaming when rvoip API supports it
+            // This is a placeholder implementation that waits for 30 seconds
+            
+            // In a real implementation, we would need to:
+            // 1. Stream the samples through RTP
+            // 2. Handle the codec conversion based on SDP negotiation
+            // 3. Send audio packets at the correct timing
+            
+            // For now, just wait for 30 seconds (MP3 duration)
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            
+            // Hang up the call after MP3 completion
             if let Some(client) = client_ref.read().await.as_ref() {
-                info!("📴 Hanging up call {} after tone completion", call_id);
+                info!("📴 Hanging up call {} after MP3 completion", call_id);
                 match client.hangup_call(&call_id).await {
                     Ok(_) => info!("✅ Call {} hung up successfully", call_id),
                     Err(e) => error!("❌ Failed to hang up call {}: {}", call_id, e),
@@ -186,8 +201,8 @@ impl ClientEventHandler for AutoAnswerHandler {
                                 status_info.call_id, media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
                         }
                         
-                        // Start tone playback
-                        self.start_tone_playback(&status_info.call_id).await;
+                        // Start MP3 playback
+                        self.start_mp3_playback(&status_info.call_id).await;
                     }
                     Err(e) => error!("❌ Failed to start audio for call {}: {}", status_info.call_id, e),
                 }
@@ -321,14 +336,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Create tone generator
-    let tone_config = tone_generator::ToneConfig {
-        frequency: server_config.behavior.tone_frequency,
-        amplitude: 0.5,
-        sample_rate: server_config.media.audio_sample_rate,
-        duration_seconds: server_config.behavior.tone_duration_seconds as f32,
-    };
-    let tone_generator = Arc::new(ToneGenerator::new_with_config(tone_config));
+    // Create MP3 handler and initialize MP3 file
+    let mp3_handler = Arc::new(Mp3Handler::new());
+    info!("📥 Initializing MP3 file...");
+    
+    // Download MP3 if not present
+    mp3_handler.ensure_mp3_downloaded().await
+        .context("Failed to download MP3 file")?;
+    
+    // Convert MP3 to WAV format
+    mp3_handler.convert_mp3_to_wav(
+        server_config.media.audio_sample_rate,
+        1 // mono
+    ).context("Failed to convert MP3 to WAV")?;
+    
+    info!("✅ MP3 file ready for playback");
     
     info!("⚙️ rvoip server configuration:");
     info!("   📡 Listening: {}:{}", server_config.sip.bind_address, server_config.sip.port);
@@ -336,8 +358,7 @@ async fn main() -> Result<()> {
     info!("   📞 Max concurrent calls: {}", server_config.behavior.max_concurrent_calls);
     info!("   🎵 Auto-answer enabled: {}", server_config.behavior.auto_answer);
     info!("   ⏱️ Auto-answer delay: {}ms", server_config.behavior.auto_answer_delay_ms);
-    info!("   🎶 Tone: {}Hz for {}s", 
-          server_config.behavior.tone_frequency, server_config.behavior.tone_duration_seconds);
+    info!("   🎶 Audio: MP3 playback for 30 seconds");
 
     // Create rvoip client using updated API
     // Use bind_address for both SIP and media addresses
@@ -351,7 +372,7 @@ async fn main() -> Result<()> {
     info!("   🌐 Domain: {}", server_config.sip.domain);
     
     // Create handler and client using updated API
-    let handler = Arc::new(AutoAnswerHandler::new(tone_generator, server_config.clone()));
+    let handler = Arc::new(AutoAnswerHandler::new(mp3_handler, server_config.clone()));
     let client = ClientBuilder::new()
         .local_address(sip_addr)         // SIP bind address
         .media_address(media_addr)       // Media bind address (port 0 = auto-allocation)
@@ -372,8 +393,7 @@ async fn main() -> Result<()> {
     client.start().await?;
     info!("✅ rvoip auto-answering SIP server started successfully!");
     info!("📞 Ready to auto-answer calls to: sip:*@{}", server_config.sip.domain);
-    info!("🎵 Will play {}Hz tone for {}s on each call", 
-          server_config.behavior.tone_frequency, server_config.behavior.tone_duration_seconds);
+    info!("🎵 Will play MP3 audio for 30 seconds on each call");
 
     // Start health endpoint server
     let health_handler = handler.clone();

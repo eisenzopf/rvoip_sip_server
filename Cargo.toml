@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Core rvoip libraries
-rvoip = "0.1.7"
+rvoip = "0.1.9"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -41,9 +41,9 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 reqwest = { version = "0.11", features = ["json"] }
 uuid = { version = "1.0", features = ["v4"] }
 
-# Audio processing (for tone generation)
-# hound = "3.5"  # Removed: not used in code
-# rodio = "0.17"  # Removed: not needed for SIP server, causes ALSA dependency
+# Audio processing (for MP3 playback)
+symphonia = { version = "0.5", features = ["mp3"] }
+hound = "3.5"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
