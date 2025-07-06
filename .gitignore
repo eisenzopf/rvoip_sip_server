@@ -37,6 +37,9 @@ Cargo.lock
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+config-local.toml
+jocofullinterview41.mp3
+jocofullinterview41.wav
 
 # Development artifacts
 /dev-logs/
