@@ -1,31 +1,25 @@
+use std::fs;
+use std::path::Path;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::{Arg, Command};
 use daemonize::Daemonize;
-use log::{error, info};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
-
+use log::{info, error};
 use signal_hook::consts::SIGTERM;
-#[allow(unused_imports)] // Handle is used in closure, false positive
-use signal_hook_tokio::{Handle, Signals};
+use signal_hook_tokio::Signals;
+use tokio::sync::{RwLock, Mutex};
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
-use std::fs;
-use std::path::Path;
 
-// Real rvoip imports for auto-answering
-use rvoip::{
-    client_core::{
-        ClientEventHandler, ClientError, 
-        IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
-        CallAction, CallId, CallState,
-        client::{ClientManager, ClientBuilder},
-    },
+// rvoip client imports
+use rvoip::client_core::{
+    ClientBuilder, ClientManager, ClientEventHandler, 
+    CallId, CallState, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
+    CallAction, ClientError, IncomingCallInfo
 };
-
-// Health endpoint imports
-use tokio::net::TcpListener;
-use serde_json::json;
 
 mod config;
 mod logger;
@@ -46,6 +40,8 @@ struct AutoAnswerHandler {
     server_config: Arc<ServerConfig>,
     active_calls: Arc<Mutex<std::collections::HashMap<CallId, tokio::time::Instant>>>,
     call_stats: Arc<Mutex<CallStats>>,
+    // Pre-converted μ-law samples for MP3 playback
+    audio_samples: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -64,147 +60,180 @@ impl AutoAnswerHandler {
             server_config,
             active_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
             call_stats: Arc::new(Mutex::new(CallStats::default())),
+            audio_samples: Arc::new(Mutex::new(None)),
         }
     }
     
-    async fn set_client_manager(&self, client: Arc<ClientManager>) {
+    pub async fn set_client_manager(&self, client: Arc<ClientManager>) {
         *self.client_manager.write().await = Some(client);
     }
 
-    async fn start_mp3_playback(&self, call_id: &CallId) {
-        info!("🎵 Starting MP3 playback for call {}", call_id);
+    /// Set up event handling with the client
+    pub async fn set_event_handler(&self) {
+        if let Some(_client) = self.client_manager.read().await.as_ref() {
+            // The handler is already set up through ClientEventHandler trait implementation
+            info!("📡 Event handler configured for client");
+        }
+    }
+
+    /// Prepare audio samples for transmission (called during initialization)
+    pub async fn prepare_audio_samples(&self) -> Result<(), anyhow::Error> {
+        info!("📡 Preparing MP3 audio samples for transmission...");
         
-        let client_ref = Arc::clone(&self.client_manager);
-        let call_id = call_id.clone();
-        let mp3_handler = self.mp3_handler.clone();
+        // Load PCM samples from WAV file
+        let pcm_samples = self.mp3_handler.read_wav_samples()?;
         
-        tokio::spawn(async move {
-            // Load the MP3 samples
-            let _samples = match mp3_handler.read_wav_samples() {
-                Ok(samples) => samples,
-                Err(e) => {
-                    error!("❌ Failed to read MP3 samples: {}", e);
-                    return;
-                }
-            };
-            
-            info!("🎶 Playing MP3 audio for 30 seconds on call {}", call_id);
-            
-            // For now, we'll use rvoip's built-in audio transmission
-            // TODO: Implement custom audio streaming when rvoip API supports it
-            // This is a placeholder implementation that waits for 30 seconds
-            
-            // In a real implementation, we would need to:
-            // 1. Stream the samples through RTP
-            // 2. Handle the codec conversion based on SDP negotiation
-            // 3. Send audio packets at the correct timing
-            
-            // For now, just wait for 30 seconds (MP3 duration)
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            
-            // Hang up the call after MP3 completion
-            if let Some(client) = client_ref.read().await.as_ref() {
-                info!("📴 Hanging up call {} after MP3 completion", call_id);
-                match client.hangup_call(&call_id).await {
-                    Ok(_) => info!("✅ Call {} hung up successfully", call_id),
-                    Err(e) => error!("❌ Failed to hang up call {}: {}", call_id, e),
+        // Convert PCM samples to μ-law for PCMU codec
+        let mulaw_samples = self.mp3_handler.pcm_to_mulaw(&pcm_samples);
+        
+        info!("🔄 Converted {} PCM samples to {} μ-law samples for RTP transmission", 
+              pcm_samples.len(), mulaw_samples.len());
+        
+        // Store the samples for later use
+        *self.audio_samples.lock().await = Some(mulaw_samples);
+        
+        info!("✅ Audio samples prepared and ready for transmission");
+        Ok(())
+    }
+
+    /// Start custom audio transmission using pre-converted μ-law samples
+    async fn start_custom_audio_transmission(&self, call_id: &CallId) -> Result<(), anyhow::Error> {
+        info!("🎵 Starting custom audio transmission for call {}", call_id);
+        
+        // Get the pre-converted audio samples
+        let samples = {
+            let audio_samples_guard = self.audio_samples.lock().await;
+            match audio_samples_guard.as_ref() {
+                Some(samples) => samples.clone(),
+                None => {
+                    anyhow::bail!("Audio samples not prepared. Call prepare_audio_samples() first.");
                 }
             }
-        });
+        };
+        
+        info!("📡 Using {} pre-converted μ-law samples for call {}", samples.len(), call_id);
+        
+        // Use the new rvoip API to start custom audio transmission
+        if let Some(client) = self.client_manager.read().await.as_ref() {
+            client.start_audio_transmission_with_custom_audio(call_id, samples, false).await
+                .context("Failed to start custom audio transmission")?;
+                
+            info!("✅ Custom audio transmission started successfully for call {}", call_id);
+            
+            // Schedule call hangup after MP3 duration (30 seconds)
+            let call_id = call_id.clone();
+            let client_ref = Arc::clone(&self.client_manager);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                
+                if let Some(client) = client_ref.read().await.as_ref() {
+                    info!("📴 Hanging up call {} after MP3 completion", call_id);
+                    match client.hangup_call(&call_id).await {
+                        Ok(_) => info!("✅ Call {} hung up successfully after MP3 playback", call_id),
+                        Err(e) => error!("❌ Failed to hang up call {}: {}", call_id, e),
+                    }
+                }
+            });
+        } else {
+            anyhow::bail!("Client manager not available");
+        }
+        
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl ClientEventHandler for AutoAnswerHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 Incoming call: {} from {} to {}", 
-            call_info.call_id, call_info.caller_uri, call_info.callee_uri);
+        info!("📞 Incoming call: {} from {} to {}", call_info.call_id, call_info.caller_uri, call_info.callee_uri);
         
-        // Update statistics
+        // Track the call
         {
             let mut stats = self.call_stats.lock().await;
             stats.total_calls += 1;
             stats.active_calls += 1;
         }
         
-        // Add to active calls tracking
         {
             let mut active_calls = self.active_calls.lock().await;
-            active_calls.insert(call_info.call_id.clone(), tokio::time::Instant::now());
+            active_calls.insert(call_info.call_id, Instant::now());
         }
         
-        // Auto-answer after configured delay
-        let client_ref = Arc::clone(&self.client_manager);
-        let call_id = call_info.call_id.clone();
-        let delay_ms = self.server_config.behavior.auto_answer_delay_ms;
-        let handler = self.clone();
-        
-        tokio::spawn(async move {
-            info!("⏱️ Auto-answering call {} in {}ms", call_id, delay_ms);
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        // Auto-answer if enabled
+        if self.server_config.behavior.auto_answer {
+            info!("⏱️ Auto-answering call {} in {}ms", call_info.call_id, self.server_config.behavior.auto_answer_delay_ms);
             
-            if let Some(client) = client_ref.read().await.as_ref() {
-                info!("📞 Auto-answering call: {}", call_id);
-                match client.answer_call(&call_id).await {
-                    Ok(_) => {
-                        info!("✅ Call {} answered successfully", call_id);
-                        
-                        // Update statistics
-                        {
-                            let mut stats = handler.call_stats.lock().await;
-                            stats.answered_calls += 1;
-                        }
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to answer call {}: {}", call_id, e);
-                        
-                        // Update statistics
-                        {
-                            let mut stats = handler.call_stats.lock().await;
-                            stats.failed_calls += 1;
-                            stats.active_calls = stats.active_calls.saturating_sub(1);
-                        }
+            let delay = Duration::from_millis(self.server_config.behavior.auto_answer_delay_ms);
+            let client_manager = self.client_manager.clone();
+            let call_id = call_info.call_id;
+            
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                
+                if let Some(client) = client_manager.read().await.as_ref() {
+                    info!("📞 Auto-answering call: {}", call_id);
+                    
+                    match client.answer_call(&call_id).await {
+                        Ok(_) => info!("✅ Call {} answered successfully", call_id),
+                        Err(e) => error!("❌ Failed to answer call {}: {}", call_id, e),
                     }
                 }
-            }
-        });
+            });
+        }
         
-        CallAction::Ignore // We'll handle it asynchronously
+        CallAction::Accept // Auto-answer is handled asynchronously
     }
 
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
-        let state_emoji = match status_info.new_state {
+        let state_icon = match status_info.new_state {
             CallState::Initiating => "🔄",
-            CallState::Ringing => "🔔",
+            CallState::Ringing => "🔔", 
             CallState::Connected => "✅",
             CallState::Failed => "❌",
             CallState::Cancelled => "🚫",
             CallState::Terminated => "📴",
-            _ => "❓",
+            CallState::Proceeding => "⏳",
+            CallState::Terminating => "⏹️",
+            CallState::IncomingPending => "📞",
         };
         
-        info!("{} Call {} state: {:?} → {:?}", 
-            state_emoji, status_info.call_id, status_info.previous_state, status_info.new_state);
-        
+        info!("📱 Call {} state changed to {:?} {}", 
+              status_info.call_id, status_info.new_state, state_icon);
+
         if status_info.new_state == CallState::Connected {
             info!("🎉 Call {} connected! Starting audio session...", status_info.call_id);
             
-            // Start audio transmission
+            // Get media info
             if let Some(client) = self.client_manager.read().await.as_ref() {
-                match client.start_audio_transmission(&status_info.call_id).await {
+                if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
+                    info!("📊 Media info for call {} - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
+                        status_info.call_id, media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
+                }
+                
+                // Start custom MP3 audio transmission using the new rvoip API
+                match self.start_custom_audio_transmission(&status_info.call_id).await {
                     Ok(_) => {
-                        info!("🎵 Audio transmission started for call {}", status_info.call_id);
-                        
-                        // Get media info
-                        if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
-                            info!("📊 Media info for call {} - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
-                                status_info.call_id, media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
-                        }
-                        
-                        // Start MP3 playback
-                        self.start_mp3_playback(&status_info.call_id).await;
+                        info!("✅ Started custom MP3 audio transmission for call {}", status_info.call_id);
                     }
-                    Err(e) => error!("❌ Failed to start audio for call {}: {}", status_info.call_id, e),
+                    Err(e) => {
+                        error!("❌ Failed to start custom audio transmission: {}", e);
+                        
+                        // Fallback: try tone generation for testing
+                        info!("🔄 Attempting fallback to tone generation...");
+                        match client.start_audio_transmission_with_tone(&status_info.call_id).await {
+                            Ok(_) => info!("✅ Fallback tone generation started for call {}", status_info.call_id),
+                            Err(e2) => {
+                                error!("❌ Fallback tone generation also failed: {}", e2);
+                                
+                                // Final fallback: try normal pass-through mode
+                                info!("🔄 Attempting final fallback to pass-through mode...");
+                                match client.start_audio_transmission(&status_info.call_id).await {
+                                    Ok(_) => info!("✅ Pass-through audio transmission started for call {}", status_info.call_id),
+                                    Err(e3) => error!("❌ All audio transmission methods failed for call {}: {}", status_info.call_id, e3),
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } else if status_info.new_state == CallState::Terminated {
@@ -338,33 +367,33 @@ async fn main() -> Result<()> {
 
     // Create MP3 handler and initialize MP3 file
     let mp3_handler = Arc::new(Mp3Handler::new());
-    info!("📥 Initializing MP3 file...");
     
-    // Download MP3 if not present
+    info!("📥 Initializing MP3 file...");
     mp3_handler.ensure_mp3_downloaded().await
         .context("Failed to download MP3 file")?;
     
-    // Convert MP3 to WAV format
     mp3_handler.convert_mp3_to_wav(
         server_config.media.audio_sample_rate,
-        1 // mono
+        1 // Mono channel for telephony
     ).context("Failed to convert MP3 to WAV")?;
     
     info!("✅ MP3 file ready for playback");
     
-    info!("⚙️ rvoip server configuration:");
-    info!("   📡 Listening: {}:{}", server_config.sip.bind_address, server_config.sip.port);
-    info!("   🌐 Domain: {}", server_config.sip.domain);
-    info!("   📞 Max concurrent calls: {}", server_config.behavior.max_concurrent_calls);
-    info!("   🎵 Auto-answer enabled: {}", server_config.behavior.auto_answer);
-    info!("   ⏱️ Auto-answer delay: {}ms", server_config.behavior.auto_answer_delay_ms);
-    info!("   🎶 Audio: MP3 playback for 30 seconds");
+    log_server_configuration(&server_config);
 
     // Create rvoip client using updated API
-    // Use bind_address for both SIP and media addresses
-    // The IP address propagation fix ensures SDP will contain the correct IP
-    let sip_addr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port).parse()?;
-    let media_addr = format!("{}:0", server_config.sip.bind_address).parse()?; // Port 0 for auto-allocation
+    let sip_addr: SocketAddr = format!("{}:{}", server_config.sip.bind_address, server_config.sip.port)
+        .parse()
+        .context("Failed to parse SIP address")?;
+    
+    let media_addr: SocketAddr = format!("{}:0", server_config.sip.bind_address)
+        .parse()
+        .context("Failed to parse media address")?;
+    
+    // Health endpoint address
+    let health_addr: SocketAddr = format!("127.0.0.1:{}", server_config.health.health_check_port)
+        .parse()
+        .context("Failed to parse health address")?;
     
     info!("⚙️ rvoip client configuration:");
     info!("   📡 SIP address: {}", sip_addr);
@@ -373,68 +402,55 @@ async fn main() -> Result<()> {
     
     // Create handler and client using updated API
     let handler = Arc::new(AutoAnswerHandler::new(mp3_handler, server_config.clone()));
+    
+    // Prepare audio samples for transmission
+    info!("🎵 Preparing audio samples for transmission...");
+    handler.prepare_audio_samples().await
+        .context("Failed to prepare audio samples")?;
+    info!("✅ Audio samples ready for real-time transmission");
+    
     let client = ClientBuilder::new()
         .local_address(sip_addr)         // SIP bind address
-        .media_address(media_addr)       // Media bind address (port 0 = auto-allocation)
-        .domain(server_config.sip.domain.clone())
-        .user_agent(server_config.sip.user_agent.clone())
-        .codecs(server_config.media.preferred_codecs.clone())
-        .rtp_ports(server_config.media.rtp_port_range_start, server_config.media.rtp_port_range_end)
-        .max_concurrent_calls(server_config.behavior.max_concurrent_calls as usize)
-        .echo_cancellation(false)
-        .require_srtp(false)
+        .media_address(media_addr)       // Media bind address (0.0.0.0:0 for auto)
+        .domain(&server_config.sip.domain)
         .build()
-        .await?;
-    
-    handler.set_client_manager(client.clone()).await;
-    client.set_event_handler(handler.clone()).await;
-    
-    // Start the client
-    client.start().await?;
-    info!("✅ rvoip auto-answering SIP server started successfully!");
-    info!("📞 Ready to auto-answer calls to: sip:*@{}", server_config.sip.domain);
-    info!("🎵 Will play MP3 audio for 30 seconds on each call");
+        .await
+        .context("Failed to create client")?;
 
-    // Start health endpoint server
-    let health_handler = handler.clone();
-    let health_task = tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
-        info!("🏥 Health endpoint started on http://127.0.0.1:8080/health");
+    handler.set_client_manager(client.clone()).await;
+    
+    // Set up the event handler with the client
+    client.set_event_handler(handler.clone()).await;
+
+    // Start health endpoint server (simple HTTP server)
+    let health_addr_clone = health_addr;
+    let handler_clone = handler.clone();
+    let health_server = tokio::spawn(async move {
+        use tokio::net::TcpListener;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        
+        let listener = TcpListener::bind(&health_addr_clone).await.unwrap();
+        info!("🏥 Health endpoint started on http://{}/health", health_addr_clone);
         
         loop {
             if let Ok((mut stream, _)) = listener.accept().await {
-                let health_handler = health_handler.clone();
+                let handler = handler_clone.clone();
                 tokio::spawn(async move {
-                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-                    
                     let mut buf_reader = tokio::io::BufReader::new(&mut stream);
                     let mut request_line = String::new();
                     
                     if buf_reader.read_line(&mut request_line).await.is_ok() {
                         if request_line.contains("GET /health") {
-                            let stats = health_handler.call_stats.lock().await;
-                            let _active_calls = health_handler.active_calls.lock().await;
+                            let stats = handler.call_stats.lock().await;
                             
-                            let uptime = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-                            
-                            let health_response = json!({
-                                "status": "healthy",
-                                "uptime_seconds": uptime,
-                                "active_calls": stats.active_calls,
-                                "total_calls": stats.total_calls,
-                                "answered_calls": stats.answered_calls,
-                                "failed_calls": stats.failed_calls,
-                                "memory_usage_mb": 50.0,
-                                "cpu_usage_percent": 5.0
-                            });
+                            let health_response = format!(
+                                r#"{{"status":"healthy","active_calls":{},"total_calls":{}}}"#,
+                                stats.active_calls, stats.total_calls
+                            );
                             
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                health_response.to_string().len(),
-                                health_response
+                                health_response.len(), health_response
                             );
                             
                             let _ = stream.write_all(response.as_bytes()).await;
@@ -448,76 +464,69 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Set up signal handlers for graceful shutdown
+    client.start().await.context("Failed to start client")?;
+    
+    // Signal handling for graceful shutdown
     let mut signals = Signals::new(&[SIGTERM])?;
     let handle = signals.handle();
-    let running = Arc::new(tokio::sync::RwLock::new(true));
+    let running = Arc::new(RwLock::new(true));
     
-    let running_clone = running.clone();
+    let running_clone = Arc::clone(&running);
     let signal_task = tokio::spawn(async move {
         while let Some(signal) = signals.next().await {
             match signal {
                 SIGTERM => {
-                    info!("📨 Received SIGTERM, shutting down gracefully");
-                    let mut r = running_clone.write().await;
-                    *r = false;
+                    info!("Received SIGTERM, shutting down gracefully...");
+                    *running_clone.write().await = false;
                     break;
                 }
                 _ => {}
             }
         }
-        handle.close();
     });
 
-    // Statistics reporting task
-    let stats_handler = handler.clone();
-    let stats_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        
-        loop {
-            interval.tick().await;
-            
-            let stats = stats_handler.call_stats.lock().await;
-            if stats.total_calls > 0 {
-                info!("📊 Server Statistics:");
-                info!("  📞 Calls: {} total, {} active, {} answered, {} failed",
-                      stats.total_calls, stats.active_calls, 
-                      stats.answered_calls, stats.failed_calls);
-                
-                let active_calls = stats_handler.active_calls.lock().await;
-                if !active_calls.is_empty() {
-                    info!("  🔄 Active calls: {}", active_calls.len());
-                    for (call_id, start_time) in active_calls.iter() {
-                        let duration = start_time.elapsed();
-                        info!("    📞 {}: {:?}", call_id, duration);
-                    }
-                }
+    info!("✅ rvoip auto-answering SIP server started successfully!");
+    info!("📞 Ready to auto-answer calls to: sip:*@{}", server_config.sip.domain);
+    info!("🎵 Will play MP3 audio for 30 seconds on each call");
+    info!("🎯 rvoip auto-answering SIP server is ready!");
+    info!("🏥 Health endpoint started on http://{}:{}/health", health_addr.ip(), health_addr.port());
+
+    // Main server loop
+    while *running.read().await {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let stats = handler.call_stats.lock().await;
+        info!("📊 Server Statistics:");
+        info!("  📞 Calls: {} total, {} active, {} answered, {} failed", 
+              stats.total_calls, stats.active_calls, stats.answered_calls, stats.failed_calls);
+        if stats.active_calls > 0 {
+            info!("  🔄 Active calls: {}", stats.active_calls);
+            for (call_id, start_time) in handler.active_calls.lock().await.iter() {
+                let duration = start_time.elapsed();
+                info!("    📞 {}: {:.6}s", call_id, duration.as_secs_f64());
             }
         }
-    });
-
-    info!("🎯 rvoip auto-answering SIP server is ready!");
-
-    // Main server loop - wait for shutdown signal
-    loop {
-        let r = running.read().await;
-        if !*r {
-            break;
-        }
-        drop(r);
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
+    
     info!("🛑 Shutting down rvoip SIP server...");
-    
-    // Stop tasks
+    handle.close();
     signal_task.abort();
-    stats_task.abort();
-    health_task.abort();
+    client.stop().await.context("Failed to stop client")?;
+    health_server.abort();
     
-    // Stop the client
-    client.stop().await?;
-    info!("✅ rvoip SIP server shutdown complete");
-
     Ok(())
+}
+
+fn log_server_configuration(config: &ServerConfig) {
+    info!("⚙️ rvoip server configuration:");
+    info!("   📡 Listening: {}:{}", config.sip.bind_address, config.sip.port);
+    info!("   🌐 Domain: {}", config.sip.domain);
+    info!("   📞 Max concurrent calls: {}", config.behavior.max_concurrent_calls);
+    info!("   🎵 Auto-answer enabled: {}", config.behavior.auto_answer);
+    info!("   ⏱️ Auto-answer delay: {}ms", config.behavior.auto_answer_delay_ms);
+    info!("   🎶 Audio: MP3 playback for {} seconds", 30);
+    
+    info!("⚙️ rvoip client configuration:");
+    info!("   📡 SIP address: {}:{}", config.sip.bind_address, config.sip.port);
+    info!("   🎵 Media address: {}:0", config.sip.bind_address);
+    info!("   🌐 Domain: {}", config.sip.domain);
 } 

@@ -61,14 +61,14 @@ impl Mp3Handler {
         Ok(())
     }
 
-    /// Convert MP3 to WAV format with specified parameters
-    pub fn convert_mp3_to_wav(&self, sample_rate: u32, channels: u16) -> Result<()> {
+    /// Convert MP3 to WAV format with specified parameters and proper resampling
+    pub fn convert_mp3_to_wav(&self, target_sample_rate: u32, channels: u16) -> Result<()> {
         if Path::new(&self.wav_path).exists() {
             info!("🎵 WAV file already exists: {}", self.wav_path);
             return Ok(());
         }
 
-        info!("🔄 Converting MP3 to WAV format ({}Hz, {} channels)", sample_rate, channels);
+        info!("🔄 Converting MP3 to WAV format ({}Hz, {} channels)", target_sample_rate, channels);
 
         let file = File::open(&self.mp3_path)
             .context("Failed to open MP3 file")?;
@@ -97,9 +97,13 @@ impl Mp3Handler {
             .make(&track.codec_params, &DecoderOptions { verify: false })
             .context("Failed to create decoder")?;
         
+        // Get source sample rate from the MP3
+        let source_sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+        info!("🎼 Source MP3 sample rate: {}Hz, target: {}Hz", source_sample_rate, target_sample_rate);
+        
         let spec = WavSpec {
             channels,
-            sample_rate,
+            sample_rate: target_sample_rate,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
@@ -108,7 +112,8 @@ impl Mp3Handler {
             .context("Failed to create WAV writer")?;
         
         let mut sample_count = 0;
-        let max_samples = sample_rate as usize * 30; // 30 seconds
+        let max_samples = target_sample_rate as usize * 30; // 30 seconds at target rate
+        let mut resampler = SimpleResampler::new(source_sample_rate, target_sample_rate);
         
         loop {
             let packet = match format.next_packet() {
@@ -139,25 +144,55 @@ impl Mp3Handler {
             // Convert to the target format and write samples
             match audio_buf {
                 AudioBufferRef::F32(buf) => {
+                    // Process samples with resampling
                     for &sample in buf.chan(0) {
                         if sample_count >= max_samples {
                             break;
                         }
-                        let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        writer.write_sample(sample_i16)
-                            .context("Failed to write sample")?;
-                        sample_count += 1;
+                        
+                        // Resample if needed
+                        let resampled_samples = if source_sample_rate != target_sample_rate {
+                            resampler.process_sample(sample)
+                        } else {
+                            vec![sample]
+                        };
+                        
+                        for resampled_sample in resampled_samples {
+                            if sample_count >= max_samples {
+                                break;
+                            }
+                            let sample_i16 = (resampled_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            writer.write_sample(sample_i16)
+                                .context("Failed to write sample")?;
+                            sample_count += 1;
+                        }
                     }
                 }
                 AudioBufferRef::F64(buf) => {
+                    // Process samples with resampling
                     for &sample in buf.chan(0) {
                         if sample_count >= max_samples {
                             break;
                         }
-                        let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        writer.write_sample(sample_i16)
-                            .context("Failed to write sample")?;
-                        sample_count += 1;
+                        
+                        let sample_f32 = sample as f32;
+                        
+                        // Resample if needed
+                        let resampled_samples = if source_sample_rate != target_sample_rate {
+                            resampler.process_sample(sample_f32)
+                        } else {
+                            vec![sample_f32]
+                        };
+                        
+                        for resampled_sample in resampled_samples {
+                            if sample_count >= max_samples {
+                                break;
+                            }
+                            let sample_i16 = (resampled_sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            writer.write_sample(sample_i16)
+                                .context("Failed to write sample")?;
+                            sample_count += 1;
+                        }
                     }
                 }
                 _ => {
@@ -173,11 +208,9 @@ impl Mp3Handler {
         writer.finalize()
             .context("Failed to finalize WAV file")?;
         
-        info!("✅ MP3 converted to WAV: {} ({} samples)", self.wav_path, sample_count);
+        info!("✅ MP3 converted to WAV: {} ({} samples at {}Hz)", self.wav_path, sample_count, target_sample_rate);
         Ok(())
     }
-
-
 
     /// Read WAV file samples for streaming
     pub fn read_wav_samples(&self) -> Result<Vec<i16>> {
@@ -189,6 +222,69 @@ impl Mp3Handler {
         
         info!("📊 Loaded {} samples from WAV file", samples.len());
         Ok(samples)
+    }
+    
+    /// Convert PCM samples to μ-law for PCMU codec
+    pub fn pcm_to_mulaw(&self, pcm_samples: &[i16]) -> Vec<u8> {
+        pcm_samples.iter().map(|&sample| {
+            self.linear_to_mulaw(sample)
+        }).collect()
+    }
+    
+    /// Convert linear PCM to μ-law (G.711)
+    fn linear_to_mulaw(&self, pcm: i16) -> u8 {
+        const BIAS: i16 = 0x84;
+        const CLIP: i16 = 32635;
+
+        let sign = if pcm < 0 { 0x80 } else { 0 };
+        let sample = if pcm < 0 { -pcm } else { pcm };
+        let sample = if sample > CLIP { CLIP } else { sample };
+        let sample = sample + BIAS;
+
+        let exponent = if sample >= 0x7FFF { 7 }
+        else if sample >= 0x4000 { 6 }
+        else if sample >= 0x2000 { 5 }
+        else if sample >= 0x1000 { 4 }
+        else if sample >= 0x0800 { 3 }
+        else if sample >= 0x0400 { 2 }
+        else if sample >= 0x0200 { 1 }
+        else { 0 };
+
+        let mantissa = (sample >> (exponent + 3)) & 0x0F;
+        let mulaw = sign | (exponent << 4) | mantissa;
+        !mulaw as u8
+    }
+}
+
+/// Simple linear resampler for basic sample rate conversion
+struct SimpleResampler {
+    source_rate: u32,
+    target_rate: u32,
+    ratio: f64,
+    phase: f64,
+}
+
+impl SimpleResampler {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            source_rate,
+            target_rate,
+            ratio: source_rate as f64 / target_rate as f64,
+            phase: 0.0,
+        }
+    }
+    
+    fn process_sample(&mut self, input_sample: f32) -> Vec<f32> {
+        let mut output_samples = Vec::new();
+        
+        // Simple linear interpolation resampling
+        while self.phase < 1.0 {
+            output_samples.push(input_sample);
+            self.phase += self.ratio;
+        }
+        
+        self.phase -= 1.0;
+        output_samples
     }
 }
 
