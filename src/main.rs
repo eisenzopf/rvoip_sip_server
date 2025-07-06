@@ -280,7 +280,7 @@ impl ClientEventHandler for AutoAnswerHandler {
 async fn main() -> Result<()> {
     let matches = Command::new("rvoip-sip-server")
         .version("0.1.0")
-        .about("Auto-answering SIP server with tone generation using rvoip")
+        .about("Test SIP server with auto-answer and MP3 audio playback using rvoip")
         .arg(
             Arg::new("config")
                 .short('c')

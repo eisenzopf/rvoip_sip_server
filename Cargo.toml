@@ -3,7 +3,7 @@ name = "rvoip-sip-server"
 version = "0.1.0"
 edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
-description = "Auto-answering SIP server with tone generation using rvoip"
+description = "Test SIP server with auto-answer and MP3 audio playback using rvoip"
 license = "MIT OR Apache-2.0"
 
 [lib]
