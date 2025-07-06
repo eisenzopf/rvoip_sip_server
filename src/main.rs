@@ -181,7 +181,7 @@ impl ClientEventHandler for AutoAnswerHandler {
             });
         }
         
-        CallAction::Accept // Auto-answer is handled asynchronously
+        CallAction::Ignore // Let the async auto-answer logic handle it
     }
 
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
@@ -210,7 +210,7 @@ impl ClientEventHandler for AutoAnswerHandler {
                         status_info.call_id, media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
                 }
                 
-                // Start custom MP3 audio transmission using the new rvoip API
+                // Start custom MP3 audio transmission
                 match self.start_custom_audio_transmission(&status_info.call_id).await {
                     Ok(_) => {
                         info!("✅ Started custom MP3 audio transmission for call {}", status_info.call_id);
@@ -225,7 +225,7 @@ impl ClientEventHandler for AutoAnswerHandler {
                             Err(e2) => {
                                 error!("❌ Fallback tone generation also failed: {}", e2);
                                 
-                                // Final fallback: try normal pass-through mode
+                                // Final fallback: try normal pass-through mode  
                                 info!("🔄 Attempting final fallback to pass-through mode...");
                                 match client.start_audio_transmission(&status_info.call_id).await {
                                     Ok(_) => info!("✅ Pass-through audio transmission started for call {}", status_info.call_id),
