@@ -369,31 +369,39 @@ impl TelephonyAudioProcessor {
     /// Bandpass filter 300-3400Hz (telephony bandwidth)
     fn bandpass_filter(&mut self, input: f32) -> f32 {
         // 2nd order Butterworth bandpass filter coefficients for 300-3400Hz @ 8000Hz
-        // Low cutoff: 300Hz, High cutoff: 3400Hz
-        let low_freq = 300.0;
-        let high_freq = 3400.0;
+        let low_freq: f32 = 300.0;
+        let high_freq: f32 = 3400.0;
         let nyquist = self.sample_rate / 2.0;
         
-        // Normalized frequencies
-        let wc1 = 2.0 * std::f32::consts::PI * low_freq / self.sample_rate;
-        let wc2 = 2.0 * std::f32::consts::PI * high_freq / self.sample_rate;
+        // Ensure frequencies are within Nyquist limit
+        let low_freq = low_freq.min(nyquist * 0.95);
+        let high_freq = high_freq.min(nyquist * 0.95);
         
-        // Bilinear transform coefficients (simplified)
-        let k1 = (wc1 / 2.0).tan();
-        let k2 = (wc2 / 2.0).tan();
-        let k = k2 - k1;
-        let delta = 1.0 + k + k1 * k2;
+        // Normalized frequencies (0 to 1, where 1 is Nyquist)
+        let wc1 = low_freq / nyquist;
+        let wc2 = high_freq / nyquist;
         
-        // Filter coefficients
-        let a0 = k / delta;
-        let a1 = 0.0;
-        let a2 = -k / delta;
-        let b1 = (2.0 * (k1 * k2 - 1.0)) / delta;
-        let b2 = (1.0 - k + k1 * k2) / delta;
+        // Pre-warped frequencies for bilinear transform
+        let wc1_pre = (std::f32::consts::PI * wc1).tan();
+        let wc2_pre = (std::f32::consts::PI * wc2).tan();
+        
+        // Bandpass filter coefficients using proper bilinear transform
+        let bw = wc2_pre - wc1_pre;
+        let wc = (wc1_pre * wc2_pre).sqrt();
+        let k = wc.tan();
+        let k2 = k * k;
+        let a0 = 1.0 + k * bw + k2;
+        
+        // Normalized coefficients
+        let b0 = k * bw / a0;
+        let b1 = 0.0;
+        let b2 = -k * bw / a0;
+        let a1 = (2.0 * (k2 - 1.0)) / a0;
+        let a2 = (1.0 - k * bw + k2) / a0;
         
         // Apply filter
-        let output = a0 * input + a1 * self.bandpass_x1 + a2 * self.bandpass_x2 
-                   - b1 * self.bandpass_y1 - b2 * self.bandpass_y2;
+        let output = b0 * input + b1 * self.bandpass_x1 + b2 * self.bandpass_x2 
+                   - a1 * self.bandpass_y1 - a2 * self.bandpass_y2;
         
         // Update state
         self.bandpass_x2 = self.bandpass_x1;
@@ -407,7 +415,7 @@ impl TelephonyAudioProcessor {
     /// Dynamic range compressor for consistent volume levels
     fn dynamic_range_compressor(&mut self, input: f32) -> f32 {
         let input_level = input.abs();
-        let target_level = 0.5; // Target RMS level
+        let target_level = 0.5; // Target RMS level for consistent loudness
         let attack_time = 0.001; // 1ms attack
         let release_time = 0.1;  // 100ms release
         
@@ -421,16 +429,28 @@ impl TelephonyAudioProcessor {
             self.compressor_envelope = release_coeff * self.compressor_envelope + (1.0 - release_coeff) * input_level;
         }
         
-        // Compression ratio
+        // Compression with proper target level normalization
         let ratio = 4.0; // 4:1 compression
-        let threshold = 0.3;
+        let threshold = target_level * 0.7; // Threshold below target level
         
         let gain = if self.compressor_envelope > threshold {
             let excess = self.compressor_envelope - threshold;
             let compressed_excess = excess / ratio;
-            (threshold + compressed_excess) / self.compressor_envelope
+            let compressed_level = threshold + compressed_excess;
+            
+            // Normalize to target level
+            if self.compressor_envelope > 0.0 {
+                (target_level / self.compressor_envelope) * (compressed_level / target_level)
+            } else {
+                1.0
+            }
         } else {
-            1.0
+            // Boost quiet signals toward target level
+            if self.compressor_envelope > 0.0 {
+                (target_level / self.compressor_envelope).min(2.0) // Limit boost to 2x
+            } else {
+                1.0
+            }
         };
         
         input * gain
