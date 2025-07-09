@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Core rvoip libraries
-rvoip = "0.1.10"
+rvoip = "0.1.13"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
